@@ -1,0 +1,50 @@
+{
+  "team": "orel-reshka",
+  "role_by_hostname": {
+    "technic-5875": "uav1",
+    "technic-8874": "uav2"
+  },
+  "network": {
+    "event_port": 45900,
+    "control_ip": "192.168.0.90",
+    "control_port": 45910,
+    "uav1_ip": "192.168.0.29",
+    "uav2_ip": "192.168.0.184"
+  },
+  "roles": {
+    "uav1": {
+      "home_marker": 48,
+      "station_marker": 5,
+      "station_ip": "192.168.0.224"
+    },
+    "uav2": {
+      "home_marker": 27,
+      "cargo_marker": 0,
+      "station_marker": 37,
+      "station_ip": "SET_STATION_37_IP"
+    }
+  },
+  "navigation": {
+    "cruise_altitude": 2.0,
+    "station_departure_height": 1.0,
+    "speed": 0.3,
+    "arrival_tolerance": 0.25,
+    "navigation_timeout": 45.0,
+    "marker_timeout": 10.0,
+    "landing_timeout": 30.0
+  },
+  "timing": {
+    "charge_seconds": 15.0,
+    "green_seconds": 5.0,
+    "station_invitation_timeout": 45.0,
+    "operator_timeout": 300.0
+  },
+  "servo": {
+    "enabled": false,
+    "pwm_path": "/sys/class/pwm/pwmchip0/pwm0",
+    "period_ns": 20000000,
+    "open_ns": null,
+    "closed_ns": null,
+    "move_seconds": 1.0
+  }
+}

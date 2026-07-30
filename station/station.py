@@ -29,7 +29,51 @@ def load_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+class RosCamera:
+    def __init__(self, config):
+        import rospy
+        from cv_bridge import CvBridge
+        from sensor_msgs.msg import Image
+
+        if not rospy.core.is_initialized():
+            rospy.init_node(
+                "energy_race_station_camera",
+                anonymous=True,
+                disable_signals=True,
+            )
+        self.rospy = rospy
+        self.bridge = CvBridge()
+        self.image_type = Image
+        self.topic = config["camera_topic"]
+
+        try:
+            rospy.wait_for_message(self.topic, Image, timeout=5.0)
+        except rospy.ROSException:
+            raise RuntimeError(
+                "нет кадров в ROS-топике {}. Проверь: "
+                "rostopic hz {}".format(self.topic, self.topic)
+            )
+
+    def read(self):
+        try:
+            message = self.rospy.wait_for_message(
+                self.topic, self.image_type, timeout=3.0
+            )
+        except self.rospy.ROSException:
+            return False, None
+        return True, self.bridge.imgmsg_to_cv2(message, "bgr8")
+
+    def release(self):
+        pass
+
+
 def open_camera(config):
+    mode = config.get("camera_mode", "v4l2")
+    if mode == "ros":
+        return RosCamera(config)
+    if mode != "v4l2":
+        raise RuntimeError("camera_mode должен быть ros или v4l2")
+
     index = config["camera_index"]
     camera = cv2.VideoCapture(index)
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, int(config["camera_width"]))
@@ -90,10 +134,34 @@ def color_score(frame, config):
 class StatusLed:
     def __init__(self, config):
         pins = config["status_led"]
+        self.mode = pins.get("mode", "none")
         values = (pins["red_gpio"], pins["green_gpio"], pins["blue_gpio"])
         self.led = None
-        if any(value is None for value in values):
+        if self.mode == "none":
             return
+        if self.mode == "ros":
+            try:
+                import rospy
+                from clover.srv import SetLEDEffect
+
+                if not rospy.core.is_initialized():
+                    rospy.init_node(
+                        "energy_race_station",
+                        anonymous=True,
+                        disable_signals=True,
+                    )
+                rospy.wait_for_service("led/set_effect", timeout=5)
+                self.led = rospy.ServiceProxy(
+                    "led/set_effect", SetLEDEffect
+                )
+            except Exception as error:
+                print("status LED ROS отключён: {}".format(error), flush=True)
+                self.mode = "none"
+            return
+        if self.mode != "gpio":
+            raise RuntimeError("status_led.mode: none, ros или gpio")
+        if any(value is None for value in values):
+            raise RuntimeError("для status_led.mode=gpio нужны три GPIO")
         try:
             from gpiozero import RGBLED
 
@@ -109,6 +177,21 @@ class StatusLed:
     def set(self, color):
         if self.led is None:
             return
+        if self.mode == "ros":
+            effects = {
+                "free": ("fill", 0, 80, 0),
+                "pending": ("blink", 255, 180, 0),
+                "reserved": ("fill", 0, 0, 255),
+                "occupied": ("fill", 255, 0, 0),
+            }
+            effect, red, green, blue = effects[color]
+            try:
+                self.led(
+                    effect=effect, r=red, g=green, b=blue
+                )
+            except Exception as error:
+                print("status LED error: {}".format(error), flush=True)
+            return
         colors = {
             "free": (0, 1, 0),
             "pending": (1, 1, 0),
@@ -119,7 +202,13 @@ class StatusLed:
 
     def close(self):
         if self.led is not None:
-            self.led.close()
+            if self.mode == "ros":
+                try:
+                    self.led(effect="fill", r=0, g=0, b=0)
+                except Exception:
+                    pass
+            else:
+                self.led.close()
 
 
 class Station:

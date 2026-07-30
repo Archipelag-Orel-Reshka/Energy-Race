@@ -15,6 +15,7 @@ TIMEOUT = 40.0
 
 station_ip = input("IP Raspberry Pi станции: ").strip()
 station_id = int(input("Номер станции (5 или 37): ").strip())
+led_color = input("Цвет детекта [red]: ").strip().lower() or "red"
 request_id = str(uuid.uuid4())
 
 request = {
@@ -24,7 +25,7 @@ request = {
     "station": station_id,
     "request_id": request_id,
     "reply_port": DRONE_PORT,
-    "led": "green",
+    "led": led_color,
 }
 
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -37,7 +38,9 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.sendto(payload, (station_ip, STATION_PORT))
         time.sleep(0.05)
 
-    print("REQUEST_LAND отправлен. Покажи камере зелёную ленту.")
+    print("REQUEST_LAND отправлен. Покажи камере {} ленту.".format(
+        led_color
+    ))
     deadline = time.monotonic() + TIMEOUT
     while time.monotonic() < deadline:
         try:

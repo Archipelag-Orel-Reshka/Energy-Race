@@ -94,7 +94,8 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", CONTROL_PORT))
 
-    print("Запусти mission.py на обоих дронах и дождись READY.")
+    print("Запусти uav1.py и uav2.py на соответствующих дронах.")
+    print("Дождись WAIT_START и жёлтого мигания на обоих БВС.")
     if input("Для синхронного старта введи START: ").strip() != "START":
         raise SystemExit("Старт отменён")
 

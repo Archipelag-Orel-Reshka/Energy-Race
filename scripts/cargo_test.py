@@ -17,7 +17,6 @@ MARKER_TIMEOUT = 10.0
 HOME = (6.0, 3.0)   # ArUco 27
 CARGO = (0.0, 6.0)  # ArUco 0
 
-
 rospy.init_node("energy_race_cargo_test")
 
 for service in ("get_telemetry", "navigate", "land", "led/set_effect"):

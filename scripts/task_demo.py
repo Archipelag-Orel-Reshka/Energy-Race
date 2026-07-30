@@ -9,8 +9,8 @@ from std_srvs.srv import Trigger
 from technic.srv import GetTelemetry, Navigate, SetLEDEffect
 
 
-ALTITUDE = 1.3
-SPEED = 0.35
+ALTITUDE = 2
+SPEED = 0.4
 ARRIVAL_TIMEOUT = 35.0
 MARKER_TIMEOUT = 8.0
 

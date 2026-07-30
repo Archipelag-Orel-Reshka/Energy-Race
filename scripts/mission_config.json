@@ -14,20 +14,20 @@
   "roles": {
     "uav1": {
       "home_marker": 48,
-      "station_marker": 5,
-      "station_ip": "192.168.0.224"
+      "station_marker": 37,
+      "station_ip": "SET_STATION_37_IP"
     },
     "uav2": {
       "home_marker": 27,
       "cargo_marker": 0,
-      "station_marker": 37,
-      "station_ip": "SET_STATION_37_IP"
+      "station_marker": 5,
+      "station_ip": "192.168.0.224"
     }
   },
   "navigation": {
     "cruise_altitude": 2.0,
     "station_departure_height": 1.0,
-    "speed": 0.3,
+    "speed": 0.35,
     "arrival_tolerance": 0.25,
     "navigation_timeout": 45.0,
     "marker_timeout": 10.0,

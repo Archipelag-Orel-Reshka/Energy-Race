@@ -219,15 +219,20 @@ class Servo:
 
 
 class Mission:
-    def __init__(self, config):
+    def __init__(self, config, forced_role=None):
         self.config = config
-        hostname = socket.gethostname()
-        try:
-            self.role = config["role_by_hostname"][hostname]
-        except KeyError:
-            raise RuntimeError(
-                "hostname {} отсутствует в role_by_hostname".format(hostname)
-            )
+        if forced_role is not None:
+            if forced_role not in config["roles"]:
+                raise RuntimeError("неизвестная роль {}".format(forced_role))
+            self.role = forced_role
+        else:
+            hostname = socket.gethostname()
+            try:
+                self.role = config["role_by_hostname"][hostname]
+            except KeyError:
+                raise RuntimeError(
+                    "hostname {} отсутствует в role_by_hostname".format(hostname)
+                )
         self.role_config = config["roles"][self.role]
         self.navigation = config["navigation"]
         self.timing = config["timing"]
@@ -561,9 +566,9 @@ class Mission:
         self.bus.close()
 
 
-def main():
+def main(forced_role=None):
     config = load_config()
-    mission = Mission(config)
+    mission = Mission(config, forced_role=forced_role)
     try:
         mission.run()
         return 0

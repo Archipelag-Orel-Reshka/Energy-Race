@@ -226,20 +226,11 @@ class Servo:
 
 
 class Mission:
-    def __init__(self, config, forced_role=None):
+    def __init__(self, config, role):
         self.config = config
-        if forced_role is not None:
-            if forced_role not in config["roles"]:
-                raise RuntimeError("неизвестная роль {}".format(forced_role))
-            self.role = forced_role
-        else:
-            hostname = socket.gethostname()
-            try:
-                self.role = config["role_by_hostname"][hostname]
-            except KeyError:
-                raise RuntimeError(
-                    "hostname {} отсутствует в role_by_hostname".format(hostname)
-                )
+        if role not in config["roles"]:
+            raise RuntimeError("неизвестная роль {}".format(role))
+        self.role = role
         self.role_config = config["roles"][self.role]
         self.navigation = config["navigation"]
         self.timing = config["timing"]
@@ -249,6 +240,7 @@ class Mission:
         self.bus = UdpBus(self.network, self.role, self.log)
         self.servo = Servo(config["servo"], self.log)
         self.visible_markers = set()
+        self.current_marker = int(self.role_config["home_marker"])
         self.flight_active = False
         self.station_request_id = None
 
@@ -359,6 +351,10 @@ class Mission:
         self.enter("CAPTURE_CARGO_RED")
         self.led("fill", 255, 0, 0)
         self.servo.close_grip()
+        self.bus.status("CARGO_READY")
+
+        self.enter("WAIT_UAV1_CHARGED")
+        self.bus.wait("UAV2_DEPART", self.timing["operator_timeout"])
 
         self.enter("FLY_TO_STATION_RED")
         self.takeoff(self.navigation["cruise_altitude"])
@@ -449,20 +445,38 @@ class Mission:
         )
 
     def goto_marker(self, marker_id):
-        x, y = marker_position(marker_id)
+        marker_id = int(marker_id)
+        current_x, current_y = marker_position(self.current_marker)
+        target_x, target_y = marker_position(marker_id)
         self.log.write(
             "goto_marker",
             marker=marker_id,
-            x=x,
-            y=y,
+            x=target_x,
+            y=target_y,
             z=self.navigation["cruise_altitude"],
         )
-        self.navigate_wait(
-            x=x,
-            y=y,
-            z=float(self.navigation["cruise_altitude"]),
-            frame_id="aruco_map",
-        )
+
+        while current_x != target_x or current_y != target_y:
+            if current_x != target_x:
+                current_x += 1.0 if target_x > current_x else -1.0
+            else:
+                current_y += 1.0 if target_y > current_y else -1.0
+
+            waypoint_marker = int((6.0 - current_y) * 7 + current_x)
+            self.log.write(
+                "route_leg",
+                marker=waypoint_marker,
+                x=current_x,
+                y=current_y,
+            )
+            self.navigate_wait(
+                x=current_x,
+                y=current_y,
+                z=float(self.navigation["cruise_altitude"]),
+                frame_id="aruco_map",
+            )
+
+        self.current_marker = marker_id
 
     def navigate_wait(self, x, y, z, frame_id, auto_arm=False):
         self.navigate(
@@ -527,6 +541,8 @@ class Mission:
         )
         if int(invitation.get("station", -1)) != station_id:
             raise RuntimeError("приглашение пришло от другой станции")
+        if invitation.get("detected_color") != "red":
+            raise RuntimeError("станция не подтвердила красную ленту")
         self.log.write(
             "landing_granted",
             station=station_id,
@@ -573,9 +589,11 @@ class Mission:
         self.bus.close()
 
 
-def main(forced_role=None):
+def main(role=None):
+    if role is None:
+        raise SystemExit("Запусти uav1.py или uav2.py, не mission.py")
     config = load_config()
-    mission = Mission(config, forced_role=forced_role)
+    mission = Mission(config, role)
     try:
         mission.run()
         return 0

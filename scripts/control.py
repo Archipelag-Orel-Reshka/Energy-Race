@@ -18,94 +18,115 @@ DRONES = {
 }
 EVENT_PORT = int(NETWORK["event_port"])
 CONTROL_PORT = int(NETWORK["control_port"])
+OPERATOR_TIMEOUT = float(CONFIG["timing"]["operator_timeout"])
 
 
-def send(sock, event, target):
-    payload = json.dumps({
-        "team": TEAM,
-        "event": event,
-        "target": target,
-    }).encode("utf-8")
+def send_events(sock, commands):
+    messages = []
+    for event, target in commands:
+        messages.append((
+            event,
+            target,
+            json.dumps({
+                "team": TEAM,
+                "event": event,
+                "target": target,
+            }).encode("utf-8"),
+        ))
+
     for _ in range(8):
-        sock.sendto(payload, (DRONES[target], EVENT_PORT))
-        time.sleep(0.05)
-    print("{} -> {} ({})".format(event, target, DRONES[target]))
-
-
-def send_start(sock):
-    messages = {}
-    for target in DRONES:
-        messages[target] = json.dumps({
-            "team": TEAM,
-            "event": "START",
-            "target": target,
-        }).encode("utf-8")
-    for _ in range(8):
-        for target, payload in messages.items():
+        for _, target, payload in messages:
             sock.sendto(payload, (DRONES[target], EVENT_PORT))
         time.sleep(0.05)
-    print("START -> uav1 и uav2")
+
+    for event, target, _ in messages:
+        print("{} -> {} ({})".format(event, target, DRONES[target]))
 
 
-def wait_statuses(sock):
-    states = {"uav1": set(), "uav2": set()}
-    deadline = time.monotonic() + 300.0
-    safe_reported = False
+def receive_status(sock, states):
+    sock.settimeout(1.0)
+    try:
+        payload, address = sock.recvfrom(4096)
+    except socket.timeout:
+        return
 
+    try:
+        message = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if message.get("team") != TEAM or message.get("event") != "STATUS":
+        return
+
+    role = message.get("uav")
+    state = message.get("state")
+    if role not in states:
+        return
+    if state in states[role]:
+        return
+    states[role].add(state)
+    print("{}: {} ({})".format(role, state, address[0]))
+
+
+def wait_states(sock, states, required, description):
+    deadline = time.monotonic() + OPERATOR_TIMEOUT
     while time.monotonic() < deadline:
-        sock.settimeout(1.0)
-        try:
-            payload, address = sock.recvfrom(4096)
-        except socket.timeout:
-            continue
-        try:
-            message = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if message.get("team") != TEAM:
-            continue
-        if message.get("event") != "STATUS":
-            continue
-        role = message.get("uav")
-        state = message.get("state")
-        if role not in states:
-            continue
-        states[role].add(state)
-        print("{}: {} ({})".format(role, state, address[0]))
-
-        both_landed = (
-            "STATION_LANDED" in states["uav1"]
-            and "CARGO_LANDED" in states["uav2"]
-        )
-        if both_landed and not safe_reported:
-            safe_reported = True
-            print()
-            print("Оба дрона landed/disarmed. Можно войти и установить груз.")
-            print("После установки обязательно выйти из полётной зоны.")
-            print()
-
-        if both_landed and "CHARGE_DONE" in states["uav1"]:
+        if all(state in states[role] for role, state in required):
             return
+        receive_status(sock, states)
 
-    raise RuntimeError("дроны не перешли в состояние готовности за 300 секунд")
+    raise RuntimeError("таймаут: {}".format(description))
 
 
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", CONTROL_PORT))
 
+    states = {"uav1": set(), "uav2": set()}
     print("Запусти uav1.py и uav2.py на соответствующих дронах.")
-    print("Дождись WAIT_START и жёлтого мигания на обоих БВС.")
+    print("Ожидаю автоматический READY от обоих БВС.")
+    wait_states(
+        sock,
+        states,
+        (("uav1", "READY"), ("uav2", "READY")),
+        "не получен READY от обоих БВС",
+    )
+
+    print("Оба БВС готовы и мигают жёлтым.")
     if input("Для синхронного старта введи START: ").strip() != "START":
         raise SystemExit("Старт отменён")
 
-    send_start(sock)
-    wait_statuses(sock)
+    send_events(sock, (("START", "uav1"), ("START", "uav2")))
+    wait_states(
+        sock,
+        states,
+        (("uav1", "STATION_LANDED"), ("uav2", "CARGO_LANDED")),
+        "оба БВС не сели и не разоружились",
+    )
 
-    print("БВС-1 заряжен, оба дрона разоружены.")
+    print()
+    print("Оба БВС landed/disarmed. Можно войти и установить груз.")
+    print("После установки обязательно выйти из полётной зоны.")
     if input("Когда человек вышел из клетки, введи FLY: ").strip() != "FLY":
         raise SystemExit("Продолжение отменено, дроны остаются disarmed")
 
-    send(sock, "RETURN_HOME", "uav1")
-    send(sock, "CARGO_LOADED", "uav2")
-    print("Продолжение миссии отправлено обоим дронам.")
+    send_events(sock, (("CARGO_LOADED", "uav2"),))
+    wait_states(
+        sock,
+        states,
+        (("uav1", "CHARGE_DONE"), ("uav2", "CARGO_READY")),
+        "не завершена зарядка БВС-1 или захват груза БВС-2",
+    )
+
+    send_events(
+        sock,
+        (("RETURN_HOME", "uav1"), ("UAV2_DEPART", "uav2")),
+    )
+    print("БВС-1 возвращается домой, БВС-2 летит с грузом к станции.")
+
+    wait_states(
+        sock,
+        states,
+        (("uav1", "DONE"), ("uav2", "DONE")),
+        "миссия не завершена обоими БВС",
+    )
+    print("Миссия завершена обоими БВС.")

@@ -1,9 +1,5 @@
 {
   "team": "orel-reshka",
-  "role_by_hostname": {
-    "technic-5875": "uav1",
-    "technic-8874": "uav2"
-  },
   "network": {
     "event_port": 45900,
     "control_ip": "192.168.0.90",

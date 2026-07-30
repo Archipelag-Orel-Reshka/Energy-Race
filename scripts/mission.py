@@ -163,6 +163,13 @@ class Servo:
         period = int(self._read("period"))
         if period != int(self.config["period_ns"]):
             raise RuntimeError("unexpected servo PWM period: {}".format(period))
+        polarity = self._read("polarity")
+        if polarity != self.config["polarity"]:
+            raise RuntimeError(
+                "unexpected servo PWM polarity: {}; run test_servo_pwm.py".format(
+                    polarity
+                )
+            )
         for name in ("open_ns", "closed_ns"):
             value = self.config[name]
             if not isinstance(value, int) or not 1_000_000 <= value <= 2_000_000:

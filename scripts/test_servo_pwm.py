@@ -8,8 +8,8 @@ from pathlib import Path
 PWM = Path("/sys/class/pwm/pwmchip0/pwm0")
 PERIOD = 20_000_000
 CENTER = 1_500_000
-SIDE_A = 1_400_000
-SIDE_B = 1_600_000
+SIDE_A = 1_450_000
+SIDE_B = 1_550_000
 
 
 def read(name):
@@ -44,9 +44,15 @@ if input("Для небольшого тестового движения вве
     raise SystemExit("Тест отменён")
 
 try:
+    if read("enable") == "1":
+        write("enable", 0)
+    if read("polarity") != "normal":
+        write("polarity", "normal")
     write("duty_cycle", CENTER)
-    if read("enable") != "1":
-        write("enable", 1)
+    write("enable", 1)
+    print("Тестовый PWM включён: polarity={}, enable={}".format(
+        read("polarity"), read("enable")
+    ))
     time.sleep(1.0)
 
     print("Сторона A:", SIDE_A)
@@ -68,4 +74,4 @@ finally:
         if read("enable") == "1":
             write("enable", 0)
 
-print("Готово. PWM выключен, серво освобождён.")
+print("Готово. enable=0 после теста — это нормально: PWM выключен.")

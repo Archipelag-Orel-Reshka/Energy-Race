@@ -43,6 +43,7 @@
     "enabled": false,
     "pwm_path": "/sys/class/pwm/pwmchip0/pwm0",
     "period_ns": 20000000,
+    "polarity": "normal",
     "open_ns": null,
     "closed_ns": null,
     "move_seconds": 1.0

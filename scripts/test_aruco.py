@@ -5,27 +5,26 @@ import time
 
 import rospy
 from aruco_pose.msg import MarkerArray
-from clover.srv import GetTelemetry, Navigate, SetLEDEffect
 from std_srvs.srv import Trigger
+from technic.srv import GetTelemetry, Navigate, SetLEDEffect
 
 
-ALTITUDE = 1.3
+ALTITUDE = 2
 SPEED = 0.35
 ARRIVAL_TOLERANCE = 0.25
 ARRIVAL_TIMEOUT = 35.0
+
+MARKER_CYCLE = [
+    47, 46, 45, 44, 43, 42, 35, 28, 21, 14, 7, 0,
+    1, 8, 15, 22, 29, 36, 37, 30, 23, 16, 9, 2,
+    3, 10, 17, 24, 31, 38, 39, 32, 25, 18, 11, 4,
+    5, 6, 13, 12, 19, 20, 27, 26, 33, 34, 41, 40,
+]
 
 
 def marker_position(marker_id):
     row, column = divmod(marker_id, 7)
     return float(column), float(6 - row)
-
-
-def make_route():
-    route = []
-    for row in range(6, -1, -1):
-        markers = list(range(row * 7, row * 7 + 7))
-        route.extend(reversed(markers) if row % 2 == 0 else markers)
-    return route
 
 
 rospy.init_node("energy_race_aruco_test")
@@ -109,9 +108,9 @@ telemetry = get_telemetry()
 if hasattr(telemetry, "connected") and not telemetry.connected:
     raise RuntimeError("PX4 is not connected")
 
-print("Поставь дрон над маркером 48, освободи поле и оставь пульт включённым.")
-if input("Для взлёта введи FLY: ").strip() != "FLY":
-    raise SystemExit("Полёт отменён")
+home_x, home_y = marker_position(48)
+if input("Send FLY: ").strip() != "FLY":
+    raise SystemExit("denied")
 
 flight_active = False
 
@@ -123,16 +122,24 @@ try:
     while not detected and time.monotonic() < first_marker_deadline:
         rospy.sleep(0.1)
     if not detected:
-        raise RuntimeError("ArUco is not detected after takeoff")
+        raise RuntimeError("aruco in not detect")
 
-    for marker_id in make_route():
+    for marker_id in MARKER_CYCLE:
         x, y = marker_position(marker_id)
         rospy.loginfo("marker %d: x=%.1f y=%.1f", marker_id, x, y)
         navigate_wait(x=x, y=y, z=ALTITUDE, frame_id="aruco_map")
         rospy.sleep(0.3)
 
-    navigate_wait(x=6.0, y=0.0, z=ALTITUDE, frame_id="aruco_map")
-    rospy.loginfo("detected %d/49 markers", len(detected))
+    navigate_wait(
+        x=home_x,
+        y=home_y,
+        z=ALTITUDE,
+        frame_id="aruco_map",
+    )
+    rospy.loginfo(
+        "detected %d/48 visible markers (48 is covered by H)",
+        len(detected.intersection(MARKER_CYCLE)),
+    )
     land_wait()
     flight_active = False
 finally:

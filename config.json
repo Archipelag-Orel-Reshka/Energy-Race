@@ -17,14 +17,21 @@
     },
     "field": {
       "platform": "clover5",
+      "markers": {
+        "cargo": 0,
+        "station_1": 5,
+        "station_2": 37,
+        "uav1_home": 48,
+        "uav2_home": 27
+      },
       "uav1": {
-        "home": {"x": null, "y": null},
-        "station": {"x": null, "y": null}
+        "home": {"x": 6.0, "y": 0.0},
+        "station": {"x": 5.0, "y": 6.0}
       },
       "uav2": {
-        "home": {"x": null, "y": null},
-        "cargo": {"x": null, "y": null},
-        "station": {"x": null, "y": null}
+        "home": {"x": 6.0, "y": 3.0},
+        "cargo": {"x": 0.0, "y": 6.0},
+        "station": {"x": 2.0, "y": 1.0}
       }
     }
   },

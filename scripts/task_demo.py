@@ -10,7 +10,7 @@ from technic.srv import GetTelemetry, Navigate, SetLEDEffect
 
 
 ALTITUDE = 2
-SPEED = 0.4
+SPEED = 0.35
 ARRIVAL_TIMEOUT = 35.0
 MARKER_TIMEOUT = 8.0
 

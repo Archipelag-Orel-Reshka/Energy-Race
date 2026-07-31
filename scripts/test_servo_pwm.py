@@ -1,77 +1,50 @@
 #!/usr/bin/env python3
 
-import os
 import time
-from pathlib import Path
+
+import pigpio
 
 
-PWM = Path("/sys/class/pwm/pwmchip0/pwm0")
-PERIOD = 20_000_000
-CENTER = 1_500_000
-SIDE_A = 1_450_000
-SIDE_B = 1_550_000
+PIN = 27
+CENTER = 1500
+DOWN = 1300
+UP = 1700
 
 
-def read(name):
-    return (PWM / name).read_text(encoding="utf-8").strip()
+print("MG995: коричневый=GND, красный=5-6 В, жёлтый/оранжевый=PWM_0.")
+print("GND питания серво и GND Orange Pi должны быть общими.")
+print("Сними груз и освободи ход палочки.")
 
-
-def write(name, value):
-    (PWM / name).write_text(str(value), encoding="utf-8")
-
-
-if os.geteuid() != 0:
-    raise SystemExit("Запусти: sudo python3 test_servo_pwm.py")
-
-if not PWM.exists():
-    raise SystemExit("{} не найден".format(PWM))
-
-period = int(read("period"))
-if period != PERIOD:
-    raise SystemExit(
-        "Неожиданный period {} ns, ожидался {} ns".format(period, PERIOD)
-    )
-
-print("PWM:", PWM)
-print("period:", period)
-print("polarity:", read("polarity"))
-print("enable:", read("enable"))
-print("duty_cycle:", read("duty_cycle"))
-print()
-print("Сними нагрузку с серво и освободи ход качалки.")
-
-if input("Для небольшого тестового движения введи SERVO: ").strip() != "SERVO":
+if input("Для теста введи SERVO: ").strip() != "SERVO":
     raise SystemExit("Тест отменён")
 
+pi = pigpio.pi()
+if not pi.connected:
+    raise SystemExit(
+        "pigpiod недоступен. Запусти: sudo systemctl enable --now pigpiod.service"
+    )
+
 try:
-    if read("enable") == "1":
-        write("enable", 0)
-    if read("polarity") != "normal":
-        write("polarity", "normal")
-    write("duty_cycle", CENTER)
-    write("enable", 1)
-    print("Тестовый PWM включён: polarity={}, enable={}".format(
-        read("polarity"), read("enable")
-    ))
-    time.sleep(1.0)
-
-    print("Сторона A:", SIDE_A)
-    write("duty_cycle", SIDE_A)
-    time.sleep(1.0)
-
-    print("Сторона B:", SIDE_B)
-    write("duty_cycle", SIDE_B)
-    time.sleep(1.0)
-
-    print("Центр:", CENTER)
-    write("duty_cycle", CENTER)
-    time.sleep(1.0)
+    pi.set_mode(PIN, pigpio.OUTPUT)
+    for name, pulse in (
+        ("центр", CENTER),
+        ("вниз", DOWN),
+        ("вверх", UP),
+        ("центр", CENTER),
+    ):
+        result = pi.set_servo_pulsewidth(PIN, pulse)
+        if result < 0:
+            raise RuntimeError(
+                "pigpio не установил импульс {} мкс: код {}".format(
+                    pulse, result
+                )
+            )
+        print("{}: {} мкс".format(name, pulse), flush=True)
+        time.sleep(2.0)
 finally:
     try:
-        write("duty_cycle", CENTER)
-        time.sleep(0.3)
+        pi.set_servo_pulsewidth(PIN, 0)
     finally:
-        if read("enable") == "1":
-            write("enable", 0)
+        pi.stop()
 
-print("Готово. enable=0 после теста — это нормально: PWM выключен.")
+print("Готово. Управляющие импульсы выключены.")

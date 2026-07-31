@@ -46,10 +46,13 @@ def run_controller():
             sock,
             states,
             (("uav2", "CARGO_READY"),),
-            "сервопривод БВС-2 не подтвердил захват груза",
+            "БВС-2 не завершил попытку захвата груза",
         )
 
-        prompt = "Груз захвачен. Для вылета к станции 37 введи DEPART: "
+        prompt = (
+            "Проверь фактический захват груза. Для вылета к станции 37 "
+            "введи DEPART: "
+        )
         if input(prompt).strip() != "DEPART":
             raise SystemExit("Вылет отменён, БВС-2 остаётся disarmed")
         shared.send_events(sock, (("UAV2_DEPART", "uav2"),))

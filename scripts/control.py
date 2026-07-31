@@ -25,7 +25,6 @@ EVENT_PORT = int(NETWORK["event_port"])
 CONTROL_IP = NETWORK["control_ip"]
 CONTROL_PORT = int(NETWORK["control_port"])
 OPERATOR_TIMEOUT = float(CONFIG["timing"]["operator_timeout"])
-UAV2_START_DELAY = float(CONFIG["timing"]["uav2_start_delay"])
 
 
 def send_events(sock, commands):
@@ -76,6 +75,17 @@ def receive_status(sock, states):
         return
     states[role].add(state)
     print("{}: {} ({})".format(role, state, address[0]))
+    if role == "uav2" and message.get("servo_ok") is False:
+        if state == "READY":
+            print(
+                "WARNING: uav2: серво недоступно или отключено; "
+                "миссия всё равно может быть запущена."
+            )
+        elif state == "CARGO_READY":
+            print(
+                "WARNING: uav2: программное закрытие серво не удалось; "
+                "миссия продолжится, проверь груз физически."
+            )
 
 
 def wait_states(sock, states, required, description):
@@ -123,32 +133,14 @@ def run_controller():
         )
 
         print("Оба БВС готовы и мигают жёлтым.")
-        prompt = "Для поэтапного старта введи START: "
+        prompt = "Для синхронного взлёта обоих БВС введи START: "
         if input(prompt).strip() != "START":
             raise SystemExit("Старт отменён")
 
-        send_events(sock, (("START", "uav1"),))
-        print("БВС-1 взлетает с H/48 и освобождает общий маршрут.")
-        wait_states(
-            sock,
-            states,
-            (("uav1", "TAKEOFF_DONE"),),
-            "БВС-1 не подтвердил взлёт",
-        )
-        wait_states(
-            sock,
-            states,
-            (("uav1", "ROUTE_CLEAR"),),
-            "БВС-1 не освободил маршрут у маркера 19",
-        )
-        print(
-            "Маршрут свободен. Пауза {:.1f} с перед стартом БВС-2.".format(
-                UAV2_START_DELAY
-            )
-        )
-        time.sleep(UAV2_START_DELAY)
-        send_events(sock, (("START", "uav2"),))
-        print("БВС-2 летит с маркера 27 к грузу на маркере 0.")
+        send_events(sock, (("START", "uav1"), ("START", "uav2")))
+        print("Оба БВС начали взлёт синхронно.")
+        print("БВС-1 сразу летит к станции 5 после набора высоты.")
+        print("БВС-2 после набора высоты ждёт 5 с и летит к грузу 0.")
 
         wait_states(
             sock,

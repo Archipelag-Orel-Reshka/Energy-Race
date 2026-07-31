@@ -165,7 +165,7 @@ class Servo:
     def preflight(self):
         if not self.enabled:
             self.log.write("servo_disabled")
-            return
+            return False
         if shutil.which(self.command) is None:
             raise RuntimeError(
                 "gpio command not found: {}".format(self.command)
@@ -183,23 +183,18 @@ class Servo:
         if self.move_seconds <= 0.0:
             raise RuntimeError("servo.move_seconds должен быть > 0")
 
-        self._run_gpio("mode", self.pin, "pwm")
-        self.initialized = True
-        open_pwm = self._set_angle(self.open_angle)
-        time.sleep(self.move_seconds)
-        self._disable_signal()
         self.log.write(
             "servo_preflight_ok",
             pin=self.pin,
-            open_angle=self.open_angle,
-            open_pwm=open_pwm,
+            movement_tested=False,
         )
+        return True
 
     def close_grip(self):
         if not self.enabled:
             self.log.write("servo_close_skipped")
-            return
-        self._require_initialized()
+            return False
+        self._ensure_initialized()
         pwm_value = self._set_angle(self.closed_angle)
         time.sleep(self.move_seconds)
         self.log.write(
@@ -208,12 +203,13 @@ class Servo:
             angle=self.closed_angle,
             pwm=pwm_value,
         )
+        return True
 
     def open_grip(self):
         if not self.enabled:
             self.log.write("servo_open_skipped")
-            return
-        self._require_initialized()
+            return False
+        self._ensure_initialized()
         pwm_value = self._set_angle(self.open_angle)
         time.sleep(self.move_seconds)
         self._disable_signal()
@@ -223,6 +219,7 @@ class Servo:
             angle=self.open_angle,
             pwm=pwm_value,
         )
+        return True
 
     def release(self):
         if not self.enabled or not self.initialized:
@@ -248,9 +245,12 @@ class Servo:
     def _disable_signal(self):
         self._run_gpio("pwm", self.pin, 0)
 
-    def _require_initialized(self):
-        if not self.initialized:
-            raise RuntimeError("servo не прошёл preflight")
+    def _ensure_initialized(self):
+        if self.initialized:
+            return
+        self._run_gpio("mode", self.pin, "pwm")
+        self.initialized = True
+        self.log.write("servo_pwm_initialized", pin=self.pin)
 
     def _run_gpio(self, *arguments):
         command = [self.command] + [str(value) for value in arguments]
@@ -276,6 +276,43 @@ class Servo:
             )
 
 
+class UnavailableServo:
+    def __init__(self, log, error):
+        self.log = log
+        self.error = str(error)
+        self.log.write(
+            "servo_config_warning",
+            error=self.error,
+            mission_continues=True,
+        )
+
+    def preflight(self):
+        self.log.write(
+            "servo_unavailable",
+            error=self.error,
+            mission_continues=True,
+        )
+        return False
+
+    def close_grip(self):
+        self.log.write("servo_close_skipped", error=self.error)
+        return False
+
+    def open_grip(self):
+        self.log.write("servo_open_skipped", error=self.error)
+        return False
+
+    def release(self):
+        pass
+
+
+def create_servo(config, log):
+    try:
+        return Servo(config, log)
+    except Exception as error:
+        return UnavailableServo(log, error)
+
+
 class Mission:
     def __init__(self, config, role):
         self.config = config
@@ -297,12 +334,12 @@ class Mission:
         self.network["team"] = config["team"]
         self.log = MissionLog(self.role)
         self.bus = UdpBus(self.network, self.role, self.log)
-        self.servo = Servo(config["servo"], self.log)
+        self.servo = create_servo(config.get("servo", {}), self.log)
+        self.servo_available = None
         self.visible_markers = set()
         self.current_marker = int(self.role_config["home_marker"])
         self.flight_active = False
         self.station_request_id = None
-        self.route_clear_sent = False
 
         rospy.init_node(
             "energy_race_{}".format(self.role),
@@ -345,7 +382,16 @@ class Mission:
                 )
             self.preflight_station(station_ip)
         if self.role == "uav2":
-            self.servo.preflight()
+            try:
+                self.servo_available = bool(self.servo.preflight())
+            except Exception as error:
+                self.servo_available = False
+                self.log.write(
+                    "servo_preflight_warning",
+                    error=str(error),
+                    mission_continues=True,
+                )
+                self.servo.release()
         self.log.write(
             "preflight_ok",
             hostname=socket.gethostname(),
@@ -410,6 +456,8 @@ class Mission:
         self.takeoff(self.cruise_altitude)
         self.wait_any_marker()
 
+        self.hold_before_cargo_route()
+
         self.enter("FLY_TO_CARGO_YELLOW")
         self.led("blink", 255, 255, 0)
         self.goto_marker(self.role_config["cargo_marker"])
@@ -424,8 +472,8 @@ class Mission:
 
         self.enter("CAPTURE_CARGO_RED")
         self.led("fill", 255, 0, 0)
-        self.servo.close_grip()
-        self.bus.status("CARGO_READY")
+        servo_ok = self.try_servo_action("close_grip")
+        self.bus.status("CARGO_READY", servo_ok=servo_ok)
 
         self.enter("WAIT_UAV1_CHARGED")
         self.bus.wait("UAV2_DEPART", self.timing["operator_timeout"])
@@ -447,7 +495,7 @@ class Mission:
 
         self.enter("RELEASE_CARGO_RED_BLINK")
         self.led("blink", 255, 0, 0)
-        self.servo.open_grip()
+        self.try_servo_action("open_grip")
 
         self.enter("RETURN_HOME_HALF_RED_BLUE")
         self.half_red_blue()
@@ -465,7 +513,13 @@ class Mission:
 
     def wait_start(self):
         while not rospy.is_shutdown():
-            self.bus.status("READY")
+            if self.role == "uav2":
+                self.bus.status(
+                    "READY",
+                    servo_ok=bool(self.servo_available),
+                )
+            else:
+                self.bus.status("READY")
             try:
                 self.bus.wait("START", 2.0)
                 return
@@ -473,6 +527,38 @@ class Mission:
                 if str(error) != "timeout waiting for START":
                     raise
         raise RuntimeError("ROS shutdown while waiting for START")
+
+    def try_servo_action(self, action):
+        try:
+            success = bool(getattr(self.servo, action)())
+            self.servo_available = success
+            self.log.write(
+                "servo_action_result",
+                action=action,
+                success=success,
+                mission_continues=True,
+            )
+            return success
+        except Exception as error:
+            self.servo_available = False
+            self.log.write(
+                "servo_action_warning",
+                action=action,
+                error=str(error),
+                mission_continues=True,
+            )
+            self.servo.release()
+            return False
+
+    def hold_before_cargo_route(self):
+        delay = float(self.timing["uav2_route_delay"])
+        self.enter("HOLD_BEFORE_CARGO_YELLOW")
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline and not rospy.is_shutdown():
+            rospy.sleep(0.1)
+        if rospy.is_shutdown():
+            raise RuntimeError("ROS shutdown during UAV2 route delay")
+        self.log.write("uav2_route_delay_done", seconds=delay)
 
     def _markers_callback(self, message):
         self.visible_markers = {marker.id for marker in message.markers}
@@ -560,16 +646,6 @@ class Mission:
                 z=self.cruise_altitude,
                 frame_id="aruco_map",
             )
-            route_clear_marker = self.role_config.get("route_clear_marker")
-            if (
-                not self.route_clear_sent
-                and route_clear_marker is not None
-                and waypoint_marker == int(route_clear_marker)
-            ):
-                self.route_clear_sent = True
-                self.bus.status("ROUTE_CLEAR")
-                self.log.write("route_clear", marker=waypoint_marker)
-
         self.current_marker = marker_id
 
     def center_on_station(self):

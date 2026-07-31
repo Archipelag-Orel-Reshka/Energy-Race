@@ -95,7 +95,6 @@ class MissionTests(unittest.TestCase):
         )
         mission.station_mode = mission.role_config["station_mode"]
         mission.current_marker = int(mission.role_config["home_marker"])
-        mission.route_clear_sent = False
         mission.flight_active = True
         mission.log = FakeLog()
         mission.bus = FakeBus()
@@ -107,7 +106,6 @@ class MissionTests(unittest.TestCase):
         self.assertEqual((uav1["home_marker"], uav1["station_marker"]), (48, 5))
         self.assertEqual(uav1["station_ip"], "192.168.0.224")
         self.assertEqual(uav1["cruise_altitude"], 2.1)
-        self.assertEqual(uav1["route_clear_marker"], 19)
         self.assertEqual(
             (uav2["home_marker"], uav2["cargo_marker"], uav2["station_marker"]),
             (27, 0, 37),
@@ -115,6 +113,7 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(uav2["station_ip"], "192.168.0.239")
         self.assertEqual(uav2["cruise_altitude"], 2.5)
         self.assertEqual(CONFIG["network"]["uav2_ip"], "192.168.0.192")
+        self.assertEqual(CONFIG["timing"]["uav2_route_delay"], 5.0)
 
     def test_preflight_rejects_non_free_station(self):
         mission = self.make_mission("uav1")
@@ -135,7 +134,7 @@ class MissionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "не свободна: reserved"):
             mission.preflight_station("192.168.0.224")
 
-    def test_uav1_route_and_route_clear_event(self):
+    def test_uav1_route_to_station(self):
         mission = self.make_mission("uav1")
         calls = []
         mission.navigate_wait = lambda **kwargs: calls.append(kwargs)
@@ -147,8 +146,28 @@ class MissionTests(unittest.TestCase):
             for call in calls
         ]
         self.assertEqual(markers, [47, 40, 33, 26, 19, 12, 5])
-        self.assertEqual(mission.bus.states, [("ROUTE_CLEAR", {})])
+        self.assertEqual(mission.bus.states, [])
         self.assertTrue(all(call["z"] == 2.1 for call in calls))
+
+    def test_uav2_holds_five_seconds_before_cargo_route(self):
+        mission = self.make_mission("uav2")
+        clock = [0.0]
+        original_monotonic = MISSION.time.monotonic
+        original_sleep = ROS.sleep
+        MISSION.time.monotonic = lambda: clock[0]
+        ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        try:
+            mission.hold_before_cargo_route()
+        finally:
+            MISSION.time.monotonic = original_monotonic
+            ROS.sleep = original_sleep
+
+        self.assertGreaterEqual(clock[0], 5.0)
+        completed = [
+            data for event, data in mission.log.events
+            if event == "uav2_route_delay_done"
+        ]
+        self.assertEqual(completed, [{"seconds": 5.0}])
 
     def test_station_centering_uses_precise_tolerance(self):
         for role, expected in (
@@ -198,9 +217,59 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(servo.angle_to_pwm(45), 125)
         self.assertEqual(servo.angle_to_pwm(135), 275)
 
+    def test_servo_preflight_never_sends_gpio_commands(self):
+        log = FakeLog()
+        servo = MISSION.Servo(CONFIG["servo"], log)
+        commands = []
+        original_which = MISSION.shutil.which
+        MISSION.shutil.which = lambda _command: "/usr/bin/gpio"
+        servo._run_gpio = lambda *args: commands.append(args)
+        try:
+            result = servo.preflight()
+        finally:
+            MISSION.shutil.which = original_which
+
+        self.assertTrue(result)
+        self.assertEqual(commands, [])
+        self.assertFalse(servo.initialized)
+
+    def test_servo_failure_is_non_fatal(self):
+        mission = self.make_mission("uav2")
+
+        class BrokenServo:
+            released = False
+
+            def close_grip(self):
+                raise RuntimeError("gpio failed")
+
+            def release(self):
+                self.released = True
+
+        mission.servo = BrokenServo()
+        mission.servo_available = True
+
+        self.assertFalse(mission.try_servo_action("close_grip"))
+        self.assertFalse(mission.servo_available)
+        self.assertTrue(mission.servo.released)
+        warnings = [
+            data for event, data in mission.log.events
+            if event == "servo_action_warning"
+        ]
+        self.assertEqual(len(warnings), 1)
+        self.assertTrue(warnings[0]["mission_continues"])
+
+    def test_invalid_servo_config_is_non_fatal(self):
+        log = FakeLog()
+        servo = MISSION.create_servo({"enabled": True}, log)
+
+        self.assertIsInstance(servo, MISSION.UnavailableServo)
+        self.assertFalse(servo.preflight())
+        self.assertFalse(servo.close_grip())
+        self.assertFalse(servo.open_grip())
+
 
 class ControllerTests(unittest.TestCase):
-    def test_staged_start_order(self):
+    def test_synchronous_start_order(self):
         waits = []
         sends = []
         sleeps = []
@@ -244,11 +313,13 @@ class ControllerTests(unittest.TestCase):
             ) = originals
             CONTROL.__builtins__["input"] = original_input
 
-        self.assertEqual(sends[0], (("START", "uav1"),))
-        self.assertEqual(sends[1], (("START", "uav2"),))
-        self.assertIn((("uav1", "TAKEOFF_DONE"),), waits)
-        self.assertIn((("uav1", "ROUTE_CLEAR"),), waits)
-        self.assertEqual(sleeps, [3.0])
+        self.assertEqual(
+            sends[0],
+            (("START", "uav1"), ("START", "uav2")),
+        )
+        self.assertNotIn((("uav1", "TAKEOFF_DONE"),), waits)
+        self.assertFalse(any("ROUTE_CLEAR" in str(wait) for wait in waits))
+        self.assertEqual(sleeps, [])
 
 
 class StationConfigTests(unittest.TestCase):

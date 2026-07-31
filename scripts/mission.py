@@ -418,6 +418,8 @@ class Mission:
         self.wait_any_marker()
         self.bus.status("TAKEOFF_DONE")
 
+        self.hold_before_station_route()
+
         self.enter("SEARCH_STATION_RED")
         self.led("fill", 255, 0, 0)
         self.goto_marker(self.role_config["station_marker"])
@@ -455,8 +457,6 @@ class Mission:
         self.enter("TAKEOFF_YELLOW")
         self.takeoff(self.cruise_altitude)
         self.wait_any_marker()
-
-        self.hold_before_cargo_route()
 
         self.enter("FLY_TO_CARGO_YELLOW")
         self.led("blink", 255, 255, 0)
@@ -550,15 +550,15 @@ class Mission:
             self.servo.release()
             return False
 
-    def hold_before_cargo_route(self):
-        delay = float(self.timing["uav2_route_delay"])
-        self.enter("HOLD_BEFORE_CARGO_YELLOW")
+    def hold_before_station_route(self):
+        delay = float(self.timing["uav1_route_delay"])
+        self.enter("HOLD_BEFORE_STATION_YELLOW")
         deadline = time.monotonic() + delay
         while time.monotonic() < deadline and not rospy.is_shutdown():
             rospy.sleep(0.1)
         if rospy.is_shutdown():
-            raise RuntimeError("ROS shutdown during UAV2 route delay")
-        self.log.write("uav2_route_delay_done", seconds=delay)
+            raise RuntimeError("ROS shutdown during UAV1 route delay")
+        self.log.write("uav1_route_delay_done", seconds=delay)
 
     def _markers_callback(self, message):
         self.visible_markers = {marker.id for marker in message.markers}

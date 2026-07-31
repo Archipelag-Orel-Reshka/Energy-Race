@@ -105,15 +105,15 @@ class MissionTests(unittest.TestCase):
         uav2 = CONFIG["roles"]["uav2"]
         self.assertEqual((uav1["home_marker"], uav1["station_marker"]), (48, 5))
         self.assertEqual(uav1["station_ip"], "192.168.0.224")
-        self.assertEqual(uav1["cruise_altitude"], 2.1)
+        self.assertEqual(uav1["cruise_altitude"], 2.0)
         self.assertEqual(
             (uav2["home_marker"], uav2["cargo_marker"], uav2["station_marker"]),
             (27, 0, 37),
         )
         self.assertEqual(uav2["station_ip"], "192.168.0.239")
-        self.assertEqual(uav2["cruise_altitude"], 2.5)
+        self.assertEqual(uav2["cruise_altitude"], 2.0)
         self.assertEqual(CONFIG["network"]["uav2_ip"], "192.168.0.192")
-        self.assertEqual(CONFIG["timing"]["uav2_route_delay"], 5.0)
+        self.assertEqual(CONFIG["timing"]["uav1_route_delay"], 5.0)
 
     def test_preflight_rejects_non_free_station(self):
         mission = self.make_mission("uav1")
@@ -147,17 +147,17 @@ class MissionTests(unittest.TestCase):
         ]
         self.assertEqual(markers, [47, 40, 33, 26, 19, 12, 5])
         self.assertEqual(mission.bus.states, [])
-        self.assertTrue(all(call["z"] == 2.1 for call in calls))
+        self.assertTrue(all(call["z"] == 2.0 for call in calls))
 
-    def test_uav2_holds_five_seconds_before_cargo_route(self):
-        mission = self.make_mission("uav2")
+    def test_uav1_holds_five_seconds_before_station_route(self):
+        mission = self.make_mission("uav1")
         clock = [0.0]
         original_monotonic = MISSION.time.monotonic
         original_sleep = ROS.sleep
         MISSION.time.monotonic = lambda: clock[0]
         ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
         try:
-            mission.hold_before_cargo_route()
+            mission.hold_before_station_route()
         finally:
             MISSION.time.monotonic = original_monotonic
             ROS.sleep = original_sleep
@@ -165,14 +165,68 @@ class MissionTests(unittest.TestCase):
         self.assertGreaterEqual(clock[0], 5.0)
         completed = [
             data for event, data in mission.log.events
-            if event == "uav2_route_delay_done"
+            if event == "uav1_route_delay_done"
         ]
         self.assertEqual(completed, [{"seconds": 5.0}])
 
+    def test_initial_route_delay_applies_only_to_uav1(self):
+        class StopAtFirstRoute(Exception):
+            pass
+
+        def initial_events(role):
+            mission = self.make_mission(role)
+            events = []
+            mission.enter = lambda state: events.append(state)
+            mission.led = lambda *args: None
+            mission.wait_start = lambda: None
+            mission.takeoff = lambda altitude: events.append(
+                ("takeoff", altitude)
+            )
+            mission.wait_any_marker = lambda: events.append("aruco_ready")
+            mission.hold_before_station_route = lambda: events.append(
+                "uav1_delay"
+            )
+
+            def stop_at_route(marker):
+                events.append(("goto", marker))
+                raise StopAtFirstRoute()
+
+            mission.goto_marker = stop_at_route
+            with self.assertRaises(StopAtFirstRoute):
+                if role == "uav1":
+                    mission.run_uav1()
+                else:
+                    mission.run_uav2()
+            return events
+
+        self.assertEqual(
+            initial_events("uav1"),
+            [
+                "WAIT_START",
+                "TAKEOFF_YELLOW",
+                ("takeoff", 2.0),
+                "aruco_ready",
+                "uav1_delay",
+                "SEARCH_STATION_RED",
+                ("goto", 5),
+            ],
+        )
+        self.assertEqual(
+            initial_events("uav2"),
+            [
+                "WAIT_START",
+                "TAKEOFF_YELLOW",
+                ("takeoff", 2.0),
+                "aruco_ready",
+                "FLY_TO_CARGO_YELLOW",
+                ("goto", 0),
+            ],
+        )
+
     def test_station_centering_uses_precise_tolerance(self):
         for role, expected in (
-            ("uav1", (5.0, 6.0, 2.1)),
-            ("uav2", (2.0, 1.0, 2.5)),
+            ("uav1", (5.0, 6.0, 2.0)),
+            ("uav2", (2.0, 1.0, 2.0)),
         ):
             mission = self.make_mission(role)
             mission.timing["station_hold_seconds"] = 0.0

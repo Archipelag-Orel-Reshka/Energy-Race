@@ -13,7 +13,7 @@
       "station_marker": 5,
       "station_mode": "real",
       "station_ip": "192.168.0.224",
-      "cruise_altitude": 2.1
+      "cruise_altitude": 2.0
     },
     "uav2": {
       "home_marker": 27,
@@ -21,11 +21,11 @@
       "station_marker": 37,
       "station_mode": "real",
       "station_ip": "192.168.0.239",
-      "cruise_altitude": 2.5
+      "cruise_altitude": 2.0
     }
   },
   "navigation": {
-    "cruise_altitude": 2.5,
+    "cruise_altitude": 2.0,
     "station_departure_height": 1.0,
     "speed": 0.35,
     "arrival_tolerance": 0.25,
@@ -38,7 +38,7 @@
   "timing": {
     "charge_seconds": 15.0,
     "green_seconds": 5.0,
-    "uav2_route_delay": 5.0,
+    "uav1_route_delay": 5.0,
     "station_hold_seconds": 1.0,
     "station_preflight_timeout": 5.0,
     "station_invitation_timeout": 45.0,

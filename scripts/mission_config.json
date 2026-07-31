@@ -5,19 +5,24 @@
     "control_ip": "192.168.0.90",
     "control_port": 45910,
     "uav1_ip": "192.168.0.29",
-    "uav2_ip": "192.168.0.184"
+    "uav2_ip": "192.168.0.192"
   },
   "roles": {
     "uav1": {
       "home_marker": 48,
-      "station_marker": 37,
-      "station_ip": "192.168.0.224"
+      "station_marker": 5,
+      "station_mode": "real",
+      "station_ip": "192.168.0.224",
+      "route_clear_marker": 19,
+      "cruise_altitude": 2.1
     },
     "uav2": {
       "home_marker": 27,
       "cargo_marker": 0,
-      "station_marker": 5,
-      "station_ip": "192.168.0.224"
+      "station_marker": 37,
+      "station_mode": "real",
+      "station_ip": "192.168.0.239",
+      "cruise_altitude": 2.5
     }
   },
   "navigation": {
@@ -25,24 +30,29 @@
     "station_departure_height": 1.0,
     "speed": 0.35,
     "arrival_tolerance": 0.25,
+    "station_arrival_tolerance": 0.15,
     "navigation_timeout": 45.0,
     "marker_timeout": 10.0,
-    "landing_timeout": 30.0
+    "landing_timeout": 45.0,
+    "landing_retry_seconds": 10.0
   },
   "timing": {
     "charge_seconds": 15.0,
     "green_seconds": 5.0,
+    "uav2_start_delay": 3.0,
+    "station_hold_seconds": 1.0,
     "station_preflight_timeout": 5.0,
     "station_invitation_timeout": 45.0,
     "operator_timeout": 300.0
   },
   "servo": {
-    "enabled": false,
-    "pwm_path": "/sys/class/pwm/pwmchip0/pwm0",
-    "period_ns": 20000000,
-    "polarity": "normal",
-    "open_ns": null,
-    "closed_ns": null,
+    "enabled": true,
+    "command": "gpio",
+    "pin": 17,
+    "closed_angle": 45,
+    "open_angle": 135,
+    "pwm_min": 50,
+    "pwm_span": 300,
     "move_seconds": 1.0
   }
 }

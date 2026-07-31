@@ -15,7 +15,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 
-DETECTION_THRESHOLD_SCALE = 0.6
+DEFAULT_DETECTION_THRESHOLD_SCALE = 0.6
 DETECTION_WINDOW_FRAMES = 5
 DETECTION_REQUIRED_HITS = 3
 
@@ -222,8 +222,12 @@ class Station:
         self.calibration = calibration
         self.station_id = int(config["station_id"])
         self.calibrated_threshold = float(calibration["threshold"])
+        self.threshold_scale = float(config.get(
+            "threshold_scale",
+            DEFAULT_DETECTION_THRESHOLD_SCALE,
+        ))
         self.threshold = (
-            self.calibrated_threshold * DETECTION_THRESHOLD_SCALE
+            self.calibrated_threshold * self.threshold_scale
         )
         self.pending = None
         self.state = "free"
@@ -440,6 +444,7 @@ class Station:
             target_color=self.config["target_color"],
             threshold=self.threshold,
             calibrated_threshold=self.calibrated_threshold,
+            threshold_scale=self.threshold_scale,
             detection_rule="{} of {} frames".format(
                 DETECTION_REQUIRED_HITS, DETECTION_WINDOW_FRAMES
             ),
@@ -477,6 +482,12 @@ class Station:
 def validate(config, calibration):
     if int(config["station_id"]) not in (5, 37):
         raise RuntimeError("station_id должен быть 5 или 37")
+    threshold_scale = float(config.get(
+        "threshold_scale",
+        DEFAULT_DETECTION_THRESHOLD_SCALE,
+    ))
+    if not 0.1 <= threshold_scale <= 1.0:
+        raise RuntimeError("threshold_scale должен быть в диапазоне 0.1..1.0")
     if calibration["target_color"] != config["target_color"]:
         raise RuntimeError(
             "target_color изменён после калибровки; запусти calibrate.py снова"

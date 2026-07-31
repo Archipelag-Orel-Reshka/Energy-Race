@@ -1,0 +1,20 @@
+{
+  "target_color": "red",
+  "threshold": 0.005338541666666667,
+  "off_scores": [
+    0.0,
+    0.0
+  ],
+  "on_scores": [
+    0.024583333333333332,
+    0.010677083333333334
+  ],
+  "roi": {
+    "x": 0.0,
+    "y": 0.0,
+    "width": 1.0,
+    "height": 1.0
+  },
+  "min_saturation": 90,
+  "min_value": 110
+}

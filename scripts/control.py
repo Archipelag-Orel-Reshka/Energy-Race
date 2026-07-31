@@ -25,6 +25,7 @@ EVENT_PORT = int(NETWORK["event_port"])
 CONTROL_IP = NETWORK["control_ip"]
 CONTROL_PORT = int(NETWORK["control_port"])
 OPERATOR_TIMEOUT = float(CONFIG["timing"]["operator_timeout"])
+UAV2_START_DELAY = float(CONFIG["timing"]["uav2_start_delay"])
 
 
 def send_events(sock, commands):
@@ -122,11 +123,33 @@ def run_controller():
         )
 
         print("Оба БВС готовы и мигают жёлтым.")
-        prompt = "Для синхронного старта введи START: "
+        prompt = "Для поэтапного старта введи START: "
         if input(prompt).strip() != "START":
             raise SystemExit("Старт отменён")
 
-        send_events(sock, (("START", "uav1"), ("START", "uav2")))
+        send_events(sock, (("START", "uav1"),))
+        print("БВС-1 взлетает с H/48 и освобождает общий маршрут.")
+        wait_states(
+            sock,
+            states,
+            (("uav1", "TAKEOFF_DONE"),),
+            "БВС-1 не подтвердил взлёт",
+        )
+        wait_states(
+            sock,
+            states,
+            (("uav1", "ROUTE_CLEAR"),),
+            "БВС-1 не освободил маршрут у маркера 19",
+        )
+        print(
+            "Маршрут свободен. Пауза {:.1f} с перед стартом БВС-2.".format(
+                UAV2_START_DELAY
+            )
+        )
+        time.sleep(UAV2_START_DELAY)
+        send_events(sock, (("START", "uav2"),))
+        print("БВС-2 летит с маркера 27 к грузу на маркере 0.")
+
         wait_states(
             sock,
             states,
@@ -153,7 +176,9 @@ def run_controller():
             sock,
             (("RETURN_HOME", "uav1"), ("UAV2_DEPART", "uav2")),
         )
-        print("БВС-1 возвращается домой, БВС-2 летит с грузом к станции.")
+        print(
+            "БВС-1 возвращается на H/48, БВС-2 несёт груз на станцию 37."
+        )
 
         wait_states(
             sock,

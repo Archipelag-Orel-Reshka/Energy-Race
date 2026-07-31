@@ -285,6 +285,14 @@ class Mission:
         self.role_config = config["roles"][self.role]
         self.navigation = config["navigation"]
         self.timing = config["timing"]
+        self.cruise_altitude = float(self.role_config.get(
+            "cruise_altitude",
+            self.navigation["cruise_altitude"],
+        ))
+        self.station_mode = str(self.role_config.get(
+            "station_mode",
+            "real" if self.role_config.get("station_ip") else "virtual",
+        ))
         self.network = dict(config["network"])
         self.network["team"] = config["team"]
         self.log = MissionLog(self.role)
@@ -294,6 +302,7 @@ class Mission:
         self.current_marker = int(self.role_config["home_marker"])
         self.flight_active = False
         self.station_request_id = None
+        self.route_clear_sent = False
 
         rospy.init_node(
             "energy_race_{}".format(self.role),
@@ -323,12 +332,17 @@ class Mission:
         if telemetry.armed:
             raise RuntimeError("дрон уже armed до старта миссии")
         station_ip = self.role_config.get("station_ip")
-        if (
-            self.role == "uav1"
-            and (not station_ip or station_ip.startswith("SET_"))
-        ):
-            raise RuntimeError("укажи station_ip для {}".format(self.role))
-        if station_ip:
+        if self.station_mode not in ("real", "virtual"):
+            raise RuntimeError(
+                "station_mode должен быть real или virtual для {}".format(
+                    self.role
+                )
+            )
+        if self.station_mode == "real":
+            if not station_ip or station_ip.startswith("SET_"):
+                raise RuntimeError(
+                    "укажи station_ip для {}".format(self.role)
+                )
             self.preflight_station(station_ip)
         if self.role == "uav2":
             self.servo.preflight()
@@ -337,6 +351,8 @@ class Mission:
             hostname=socket.gethostname(),
             station=self.role_config["station_marker"],
             station_ip=station_ip or "virtual",
+            station_mode=self.station_mode,
+            cruise_altitude=self.cruise_altitude,
         )
 
     def run(self):
@@ -352,15 +368,16 @@ class Mission:
         self.wait_start()
 
         self.enter("TAKEOFF_YELLOW")
-        self.takeoff(self.navigation["cruise_altitude"])
+        self.takeoff(self.cruise_altitude)
         self.wait_any_marker()
+        self.bus.status("TAKEOFF_DONE")
 
         self.enter("SEARCH_STATION_RED")
         self.led("fill", 255, 0, 0)
         self.goto_marker(self.role_config["station_marker"])
+        self.center_on_station()
 
-        self.enter("WAIT_STATION_RED_DETECTION")
-        self.request_landing()
+        self.await_station_permission()
 
         self.enter("LAND_STATION")
         self.land()
@@ -390,7 +407,7 @@ class Mission:
         self.wait_start()
 
         self.enter("TAKEOFF_YELLOW")
-        self.takeoff(self.navigation["cruise_altitude"])
+        self.takeoff(self.cruise_altitude)
         self.wait_any_marker()
 
         self.enter("FLY_TO_CARGO_YELLOW")
@@ -414,18 +431,16 @@ class Mission:
         self.bus.wait("UAV2_DEPART", self.timing["operator_timeout"])
 
         self.enter("FLY_TO_STATION_RED")
-        self.takeoff(self.navigation["cruise_altitude"])
+        self.takeoff(self.cruise_altitude)
         self.wait_any_marker()
         self.goto_marker(self.role_config["station_marker"])
+        self.center_on_station()
 
-        self.enter("DEMO_VIRTUAL_STATION_5")
-        self.log.write(
-            "virtual_station_no_invitation",
-            marker=self.role_config["station_marker"],
-        )
+        self.await_station_permission()
 
-        self.enter("LAND_VIRTUAL_STATION_WITH_CARGO")
+        self.enter("LAND_STATION_WITH_CARGO")
         self.land()
+        self.notify_station("LANDED")
         self.bus.status("STATION_LANDED")
 
         self.charge()
@@ -437,6 +452,7 @@ class Mission:
         self.enter("RETURN_HOME_HALF_RED_BLUE")
         self.half_red_blue()
         self.takeoff(self.navigation["station_departure_height"])
+        self.notify_station("STATION_RELEASED")
         self.goto_marker(self.role_config["home_marker"])
 
         self.enter("LAND_HOME")
@@ -522,7 +538,7 @@ class Mission:
             marker=marker_id,
             x=target_x,
             y=target_y,
-            z=self.navigation["cruise_altitude"],
+            z=self.cruise_altitude,
         )
 
         while current_x != target_x or current_y != target_y:
@@ -541,11 +557,62 @@ class Mission:
             self.navigate_wait(
                 x=current_x,
                 y=current_y,
-                z=float(self.navigation["cruise_altitude"]),
+                z=self.cruise_altitude,
                 frame_id="aruco_map",
             )
+            route_clear_marker = self.role_config.get("route_clear_marker")
+            if (
+                not self.route_clear_sent
+                and route_clear_marker is not None
+                and waypoint_marker == int(route_clear_marker)
+            ):
+                self.route_clear_sent = True
+                self.bus.status("ROUTE_CLEAR")
+                self.log.write(
+                    "route_clear",
+                    marker=waypoint_marker,
+                )
 
         self.current_marker = marker_id
+
+    def center_on_station(self):
+        station_id = int(self.role_config["station_marker"])
+        target_x, target_y = marker_position(station_id)
+        self.enter("CENTER_ABOVE_STATION")
+        self.navigate_wait(
+            x=target_x,
+            y=target_y,
+            z=self.cruise_altitude,
+            frame_id="aruco_map",
+            arrival_tolerance=float(
+                self.navigation["station_arrival_tolerance"]
+            ),
+        )
+
+        hold_seconds = float(self.timing["station_hold_seconds"])
+        deadline = time.monotonic() + hold_seconds
+        while time.monotonic() < deadline and not rospy.is_shutdown():
+            rospy.sleep(0.1)
+        if rospy.is_shutdown():
+            raise RuntimeError("ROS shutdown while centering on station")
+        self.log.write(
+            "station_centered",
+            station=station_id,
+            altitude=self.cruise_altitude,
+            hold_seconds=hold_seconds,
+        )
+
+    def await_station_permission(self):
+        if self.station_mode == "real":
+            self.enter("WAIT_STATION_RED_DETECTION")
+            self.request_landing()
+            return
+
+        self.enter("DEMO_VIRTUAL_STATION")
+        self.log.write(
+            "virtual_station_no_invitation",
+            marker=int(self.role_config["station_marker"]),
+        )
 
     def preflight_station(self, station_ip):
         expected_station = int(self.role_config["station_marker"])
@@ -577,14 +644,31 @@ class Mission:
             raise RuntimeError(
                 "станция {} настроена не на red".format(actual_station)
             )
+        station_state = response.get("station_state")
+        if station_state != "free":
+            raise RuntimeError(
+                "станция {} не свободна: {}".format(
+                    actual_station,
+                    station_state or "unknown",
+                )
+            )
         self.log.write(
             "station_preflight_ok",
             station=actual_station,
             station_ip=station_ip,
             target_color=response.get("target_color"),
+            station_state=station_state,
         )
 
-    def navigate_wait(self, x, y, z, frame_id, auto_arm=False):
+    def navigate_wait(
+        self,
+        x,
+        y,
+        z,
+        frame_id,
+        auto_arm=False,
+        arrival_tolerance=None,
+    ):
         self.navigate(
             x=x,
             y=y,
@@ -597,6 +681,11 @@ class Mission:
         deadline = time.monotonic() + float(
             self.navigation["navigation_timeout"]
         )
+        tolerance = (
+            float(self.navigation["arrival_tolerance"])
+            if arrival_tolerance is None
+            else float(arrival_tolerance)
+        )
         while time.monotonic() < deadline and not rospy.is_shutdown():
             telemetry = self.get_telemetry(frame_id="navigate_target")
             distance = math.sqrt(
@@ -606,10 +695,12 @@ class Mission:
             )
             if (
                 math.isfinite(distance)
-                and distance < float(self.navigation["arrival_tolerance"])
+                and distance < tolerance
             ):
                 self.log.write(
-                    "navigate_arrived", distance=round(distance, 3)
+                    "navigate_arrived",
+                    distance=round(distance, 3),
+                    tolerance=tolerance,
                 )
                 return
             rospy.sleep(0.2)
@@ -618,17 +709,33 @@ class Mission:
         raise RuntimeError("navigation timeout")
 
     def land(self):
-        self.land_service()
-        deadline = time.monotonic() + float(
-            self.navigation["landing_timeout"]
-        )
+        started = time.monotonic()
+        deadline = started + float(self.navigation["landing_timeout"])
+        retry_seconds = float(self.navigation["landing_retry_seconds"])
+        next_retry = started
+        attempt = 0
         while time.monotonic() < deadline and not rospy.is_shutdown():
+            now = time.monotonic()
+            if now >= next_retry:
+                attempt += 1
+                self.land_service()
+                self.log.write(
+                    "landing_command",
+                    attempt=attempt,
+                    elapsed=round(now - started, 1),
+                )
+                next_retry = now + retry_seconds
+
             if not self.get_telemetry().armed:
                 self.flight_active = False
-                self.log.write("landed_disarmed")
+                self.log.write("landed_disarmed", attempts=attempt)
                 return
             rospy.sleep(0.2)
-        raise RuntimeError("landing timeout")
+        if rospy.is_shutdown():
+            raise RuntimeError("ROS shutdown during landing")
+        raise RuntimeError(
+            "landing timeout after {} attempts".format(attempt)
+        )
 
     def request_landing(self):
         station_id = int(self.role_config["station_marker"])
@@ -659,6 +766,13 @@ class Mission:
         )
 
     def notify_station(self, event):
+        if self.station_mode != "real":
+            self.log.write(
+                "station_notification_skipped",
+                message=event,
+                station=int(self.role_config["station_marker"]),
+            )
+            return
         self.bus.send(
             self.role_config["station_ip"],
             45901,

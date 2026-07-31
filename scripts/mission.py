@@ -110,12 +110,13 @@ class UdpBus:
 
         raise RuntimeError("timeout waiting for {}".format(event))
 
-    def status(self, state):
+    def status(self, state, **extra):
         self.send(
             self.config["control_ip"],
             self.config["control_port"],
             "STATUS",
             state=state,
+            **extra
         )
 
     def _take_pending(self, event, request_id):
@@ -244,7 +245,10 @@ class Mission:
         self.flight_active = False
         self.station_request_id = None
 
-        rospy.init_node("energy_race_{}".format(self.role))
+        rospy.init_node(
+            "energy_race_{}".format(self.role),
+            disable_signals=True,
+        )
         rospy.Subscriber(
             "aruco_detect/markers", MarkerArray, self._markers_callback
         )
@@ -271,6 +275,7 @@ class Mission:
         station_ip = self.role_config["station_ip"]
         if not station_ip or station_ip.startswith("SET_"):
             raise RuntimeError("укажи station_ip для {}".format(self.role))
+        self.preflight_station(station_ip)
         if self.role == "uav2":
             self.servo.preflight()
         self.log.write(
@@ -290,8 +295,7 @@ class Mission:
     def run_uav1(self):
         self.enter("WAIT_START")
         self.led("blink", 255, 255, 0)
-        self.bus.status("READY")
-        self.bus.wait("START", self.timing["operator_timeout"])
+        self.wait_start()
 
         self.enter("TAKEOFF_YELLOW")
         self.takeoff(self.navigation["cruise_altitude"])
@@ -329,8 +333,7 @@ class Mission:
     def run_uav2(self):
         self.enter("WAIT_START")
         self.led("blink", 255, 255, 0)
-        self.bus.status("READY")
-        self.bus.wait("START", self.timing["operator_timeout"])
+        self.wait_start()
 
         self.enter("TAKEOFF_YELLOW")
         self.takeoff(self.navigation["cruise_altitude"])
@@ -388,6 +391,17 @@ class Mission:
 
     def enter(self, state):
         self.log.enter(state)
+
+    def wait_start(self):
+        while not rospy.is_shutdown():
+            self.bus.status("READY")
+            try:
+                self.bus.wait("START", 2.0)
+                return
+            except RuntimeError as error:
+                if str(error) != "timeout waiting for START":
+                    raise
+        raise RuntimeError("ROS shutdown while waiting for START")
 
     def _markers_callback(self, message):
         self.visible_markers = {marker.id for marker in message.markers}
@@ -478,6 +492,43 @@ class Mission:
 
         self.current_marker = marker_id
 
+    def preflight_station(self, station_ip):
+        expected_station = int(self.role_config["station_marker"])
+        request_id = str(uuid.uuid4())
+        self.bus.send(
+            station_ip,
+            45901,
+            "STATION_PING",
+            station="any",
+            expected_station=expected_station,
+            request_id=request_id,
+            reply_port=self.network["event_port"],
+        )
+        response = self.bus.wait(
+            "STATION_INFO",
+            self.timing["station_preflight_timeout"],
+            request_id=request_id,
+        )
+        actual_station = int(response.get("station", -1))
+        if actual_station != expected_station:
+            raise RuntimeError(
+                "на IP {} запущена станция {}, ожидалась {}".format(
+                    station_ip,
+                    actual_station,
+                    expected_station,
+                )
+            )
+        if response.get("target_color") != "red":
+            raise RuntimeError(
+                "станция {} настроена не на red".format(actual_station)
+            )
+        self.log.write(
+            "station_preflight_ok",
+            station=actual_station,
+            station_ip=station_ip,
+            target_color=response.get("target_color"),
+        )
+
     def navigate_wait(self, x, y, z, frame_id, auto_arm=False):
         self.navigate(
             x=x,
@@ -507,6 +558,8 @@ class Mission:
                 )
                 return
             rospy.sleep(0.2)
+        if rospy.is_shutdown():
+            raise RuntimeError("ROS shutdown during navigation")
         raise RuntimeError("navigation timeout")
 
     def land(self):
@@ -599,10 +652,18 @@ def main(role=None):
         return 0
     except KeyboardInterrupt:
         mission.log.write("interrupted")
+        try:
+            mission.bus.status("INTERRUPTED")
+        except Exception:
+            pass
         mission.safe_land()
         return 130
     except Exception as error:
         mission.log.write("mission_failed", error=str(error))
+        try:
+            mission.bus.status("FAILED", error=str(error))
+        except Exception:
+            pass
         mission.safe_land()
         print("ERROR: {}".format(error), flush=True)
         return 1

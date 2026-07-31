@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 
 import json
+import os
 import socket
 import time
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = Path(os.environ.get(
+    "ENERGY_RACE_CONFIG",
+    str(ROOT / "mission_config.json"),
+))
 CONFIG = json.loads(
-    (ROOT / "mission_config.json").read_text(encoding="utf-8")
+    CONFIG_PATH.read_text(encoding="utf-8")
 )
 TEAM = CONFIG["team"]
 NETWORK = CONFIG["network"]
@@ -17,6 +22,7 @@ DRONES = {
     "uav2": NETWORK["uav2_ip"],
 }
 EVENT_PORT = int(NETWORK["event_port"])
+CONTROL_IP = NETWORK["control_ip"]
 CONTROL_PORT = int(NETWORK["control_port"])
 OPERATOR_TIMEOUT = float(CONFIG["timing"]["operator_timeout"])
 
@@ -61,6 +67,10 @@ def receive_status(sock, states):
     state = message.get("state")
     if role not in states:
         return
+    DRONES[role] = address[0]
+    if state in ("FAILED", "INTERRUPTED"):
+        detail = message.get("error") or state
+        raise RuntimeError("{}: {}".format(role, detail))
     if state in states[role]:
         return
     states[role].add(state)
@@ -70,6 +80,16 @@ def receive_status(sock, states):
 def wait_states(sock, states, required, description):
     deadline = time.monotonic() + OPERATOR_TIMEOUT
     while time.monotonic() < deadline:
+        aborted = [
+            role for role, role_states in states.items()
+            if "ABORTED" in role_states
+        ]
+        if aborted:
+            raise RuntimeError(
+                "{} безопасно прервал миссию и вернулся домой".format(
+                    ", ".join(aborted)
+                )
+            )
         if all(state in states[role] for role, state in required):
             return
         receive_status(sock, states)
@@ -77,56 +97,84 @@ def wait_states(sock, states, required, description):
     raise RuntimeError("таймаут: {}".format(description))
 
 
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("0.0.0.0", CONTROL_PORT))
+def run_controller():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((CONTROL_IP, CONTROL_PORT))
+        except OSError:
+            raise SystemExit(
+                "IP {} не назначен ноутбуку. Подключись к командному "
+                "роутеру и проверь: ip -4 addr show wlan0".format(
+                    CONTROL_IP
+                )
+            )
 
-    states = {"uav1": set(), "uav2": set()}
-    print("Запусти uav1.py и uav2.py на соответствующих дронах.")
-    print("Ожидаю автоматический READY от обоих БВС.")
-    wait_states(
-        sock,
-        states,
-        (("uav1", "READY"), ("uav2", "READY")),
-        "не получен READY от обоих БВС",
-    )
+        states = {"uav1": set(), "uav2": set()}
+        print("Контроллер: {}:{}".format(CONTROL_IP, CONTROL_PORT))
+        print("Запусти uav1.py и uav2.py на соответствующих дронах.")
+        print("Ожидаю автоматический READY от обоих БВС.")
+        wait_states(
+            sock,
+            states,
+            (("uav1", "READY"), ("uav2", "READY")),
+            "не получен READY от обоих БВС",
+        )
 
-    print("Оба БВС готовы и мигают жёлтым.")
-    if input("Для синхронного старта введи START: ").strip() != "START":
-        raise SystemExit("Старт отменён")
+        print("Оба БВС готовы и мигают жёлтым.")
+        prompt = "Для синхронного старта введи START: "
+        if input(prompt).strip() != "START":
+            raise SystemExit("Старт отменён")
 
-    send_events(sock, (("START", "uav1"), ("START", "uav2")))
-    wait_states(
-        sock,
-        states,
-        (("uav1", "STATION_LANDED"), ("uav2", "CARGO_LANDED")),
-        "оба БВС не сели и не разоружились",
-    )
+        send_events(sock, (("START", "uav1"), ("START", "uav2")))
+        wait_states(
+            sock,
+            states,
+            (("uav1", "STATION_LANDED"), ("uav2", "CARGO_LANDED")),
+            "оба БВС не сели и не разоружились",
+        )
 
-    print()
-    print("Оба БВС landed/disarmed. Можно войти и установить груз.")
-    print("После установки обязательно выйти из полётной зоны.")
-    if input("Когда человек вышел из клетки, введи FLY: ").strip() != "FLY":
-        raise SystemExit("Продолжение отменено, дроны остаются disarmed")
+        print()
+        print("Оба БВС landed/disarmed. Можно войти и установить груз.")
+        print("После установки обязательно выйти из полётной зоны.")
+        prompt = "Когда человек вышел из клетки, введи FLY: "
+        if input(prompt).strip() != "FLY":
+            raise SystemExit("Продолжение отменено, дроны остаются disarmed")
 
-    send_events(sock, (("CARGO_LOADED", "uav2"),))
-    wait_states(
-        sock,
-        states,
-        (("uav1", "CHARGE_DONE"), ("uav2", "CARGO_READY")),
-        "не завершена зарядка БВС-1 или захват груза БВС-2",
-    )
+        send_events(sock, (("CARGO_LOADED", "uav2"),))
+        wait_states(
+            sock,
+            states,
+            (("uav1", "CHARGE_DONE"), ("uav2", "CARGO_READY")),
+            "не завершена зарядка БВС-1 или захват груза БВС-2",
+        )
 
-    send_events(
-        sock,
-        (("RETURN_HOME", "uav1"), ("UAV2_DEPART", "uav2")),
-    )
-    print("БВС-1 возвращается домой, БВС-2 летит с грузом к станции.")
+        send_events(
+            sock,
+            (("RETURN_HOME", "uav1"), ("UAV2_DEPART", "uav2")),
+        )
+        print("БВС-1 возвращается домой, БВС-2 летит с грузом к станции.")
 
-    wait_states(
-        sock,
-        states,
-        (("uav1", "DONE"), ("uav2", "DONE")),
-        "миссия не завершена обоими БВС",
-    )
-    print("Миссия завершена обоими БВС.")
+        wait_states(
+            sock,
+            states,
+            (("uav1", "DONE"), ("uav2", "DONE")),
+            "миссия не завершена обоими БВС",
+        )
+        print("Миссия завершена обоими БВС.")
+
+
+def main():
+    try:
+        run_controller()
+        return 0
+    except KeyboardInterrupt:
+        print("\nКонтроллер остановлен оператором.")
+        return 130
+    except RuntimeError as error:
+        print("ERROR: {}".format(error))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -293,6 +293,10 @@ class Station:
                 continue
 
             event = message.get("event")
+            if event == "STATION_PING":
+                self.handle_ping(message, address[0])
+                continue
+
             station = message.get("station")
             if station not in (self.station_id, "any", None):
                 continue
@@ -303,6 +307,26 @@ class Station:
                 self.handle_landed(message)
             elif event == "STATION_RELEASED":
                 self.handle_released(message)
+
+    def handle_ping(self, message, ip):
+        request = {
+            "uav": str(message.get("uav", "unknown")),
+            "request_id": str(message.get("request_id") or uuid.uuid4()),
+            "ip": ip,
+            "reply_port": message.get("reply_port"),
+        }
+        self.send(
+            "STATION_INFO",
+            request,
+            target_color=self.config["target_color"],
+            station_state=self.state,
+        )
+        self.log(
+            "station_ping",
+            uav=request["uav"],
+            source=ip,
+            expected_station=message.get("expected_station"),
+        )
 
     def handle_request(self, message, ip):
         incoming_id = str(message.get("request_id") or "")

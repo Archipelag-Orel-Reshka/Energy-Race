@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from demo_mission import main
+from mission import main
 
 
 if __name__ == "__main__":

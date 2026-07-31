@@ -3,7 +3,7 @@
 import datetime
 import json
 import math
-import os
+import shutil
 import socket
 import subprocess
 import time
@@ -17,7 +17,7 @@ from technic.srv import GetTelemetry, Navigate, SetLEDEffect
 
 
 ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "demo_mission_config.json"
+CONFIG_PATH = ROOT / "mission_config.json"
 
 
 def load_config():
@@ -110,12 +110,13 @@ class UdpBus:
 
         raise RuntimeError("timeout waiting for {}".format(event))
 
-    def status(self, state):
+    def status(self, state, **extra):
         self.send(
             self.config["control_ip"],
             self.config["control_port"],
             "STATUS",
             state=state,
+            **extra
         )
 
     def _take_pending(self, event, request_id):
@@ -151,78 +152,128 @@ class Servo:
     def __init__(self, config, log):
         self.config = config
         self.log = log
-        self.path = Path(config["pwm_path"])
         self.enabled = bool(config["enabled"])
+        self.command = str(config.get("command", "gpio"))
+        self.pin = int(config["pin"])
+        self.closed_angle = float(config["closed_angle"])
+        self.open_angle = float(config["open_angle"])
+        self.pwm_min = int(config.get("pwm_min", 50))
+        self.pwm_span = int(config.get("pwm_span", 300))
+        self.move_seconds = float(config["move_seconds"])
+        self.initialized = False
 
     def preflight(self):
         if not self.enabled:
             self.log.write("servo_disabled")
             return
-        if not self.path.exists():
-            raise RuntimeError("PWM path not found: {}".format(self.path))
-        period = int(self._read("period"))
-        if period != int(self.config["period_ns"]):
-            raise RuntimeError("unexpected servo PWM period: {}".format(period))
-        polarity = self._read("polarity")
-        if polarity != self.config["polarity"]:
+        if shutil.which(self.command) is None:
             raise RuntimeError(
-                "unexpected servo PWM polarity: {}; run test_servo_pwm.py".format(
-                    polarity
-                )
+                "gpio command not found: {}".format(self.command)
             )
-        for name in ("open_ns", "closed_ns"):
-            value = self.config[name]
-            if not isinstance(value, int) or not 1_000_000 <= value <= 2_000_000:
-                raise RuntimeError("set servo.{} in 1000000..2000000".format(
-                    name
-                ))
+        if self.pin < 0:
+            raise RuntimeError("servo.pin должен быть >= 0")
+        for name, angle in (
+            ("closed_angle", self.closed_angle),
+            ("open_angle", self.open_angle),
+        ):
+            if not 0.0 <= angle <= 180.0:
+                raise RuntimeError("servo.{} должен быть 0..180".format(name))
+        if self.pwm_min < 0 or self.pwm_span <= 0:
+            raise RuntimeError("servo pwm_min/pwm_span заданы неверно")
+        if self.move_seconds <= 0.0:
+            raise RuntimeError("servo.move_seconds должен быть > 0")
+
+        self._run_gpio("mode", self.pin, "pwm")
+        self.initialized = True
+        open_pwm = self._set_angle(self.open_angle)
+        time.sleep(self.move_seconds)
+        self._disable_signal()
+        self.log.write(
+            "servo_preflight_ok",
+            pin=self.pin,
+            open_angle=self.open_angle,
+            open_pwm=open_pwm,
+        )
 
     def close_grip(self):
         if not self.enabled:
             self.log.write("servo_close_skipped")
             return
-        self._move(int(self.config["closed_ns"]), keep_enabled=True)
-        self.log.write("servo_closed")
+        self._require_initialized()
+        pwm_value = self._set_angle(self.closed_angle)
+        time.sleep(self.move_seconds)
+        self.log.write(
+            "servo_closed",
+            pin=self.pin,
+            angle=self.closed_angle,
+            pwm=pwm_value,
+        )
 
     def open_grip(self):
         if not self.enabled:
             self.log.write("servo_open_skipped")
             return
-        self._move(int(self.config["open_ns"]), keep_enabled=False)
-        self.log.write("servo_opened")
+        self._require_initialized()
+        pwm_value = self._set_angle(self.open_angle)
+        time.sleep(self.move_seconds)
+        self._disable_signal()
+        self.log.write(
+            "servo_opened",
+            pin=self.pin,
+            angle=self.open_angle,
+            pwm=pwm_value,
+        )
 
     def release(self):
-        if not self.enabled or not self.path.exists():
+        if not self.enabled or not self.initialized:
             return
         try:
-            if self._read("enable") == "1":
-                self._write("enable", 0)
+            self._disable_signal()
         except Exception as error:
             self.log.write("servo_release_failed", error=str(error))
+        finally:
+            self.initialized = False
 
-    def _move(self, duty_cycle, keep_enabled):
-        self._write("duty_cycle", duty_cycle)
-        if self._read("enable") != "1":
-            self._write("enable", 1)
-        time.sleep(float(self.config["move_seconds"]))
-        if not keep_enabled:
-            self._write("enable", 0)
-
-    def _read(self, name):
-        return (self.path / name).read_text(encoding="utf-8").strip()
-
-    def _write(self, name, value):
-        path = self.path / name
-        if os.access(str(path), os.W_OK):
-            path.write_text(str(value), encoding="utf-8")
-            return
-        subprocess.run(
-            ["sudo", "-n", "tee", str(path)],
-            input=str(value),
-            text=True,
-            stdout=subprocess.DEVNULL,
-            check=True,
+    def angle_to_pwm(self, angle):
+        actual_angle = max(0.0, min(180.0, float(angle)))
+        return int(
+            self.pwm_min + (actual_angle / 180.0) * self.pwm_span
         )
+
+    def _set_angle(self, angle):
+        pwm_value = self.angle_to_pwm(angle)
+        self._run_gpio("pwm", self.pin, pwm_value)
+        return pwm_value
+
+    def _disable_signal(self):
+        self._run_gpio("pwm", self.pin, 0)
+
+    def _require_initialized(self):
+        if not self.initialized:
+            raise RuntimeError("servo не прошёл preflight")
+
+    def _run_gpio(self, *arguments):
+        command = [self.command] + [str(value) for value in arguments]
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError:
+            raise RuntimeError("gpio command not found: {}".format(
+                self.command
+            ))
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or error.stdout or "").strip()
+            raise RuntimeError(
+                "gpio command failed: {}{}".format(
+                    " ".join(command),
+                    ": {}".format(detail) if detail else "",
+                )
+            )
 
 
 class Mission:
@@ -244,7 +295,10 @@ class Mission:
         self.flight_active = False
         self.station_request_id = None
 
-        rospy.init_node("energy_race_{}".format(self.role))
+        rospy.init_node(
+            "energy_race_{}".format(self.role),
+            disable_signals=True,
+        )
         rospy.Subscriber(
             "aruco_detect/markers", MarkerArray, self._markers_callback
         )
@@ -274,6 +328,8 @@ class Mission:
             and (not station_ip or station_ip.startswith("SET_"))
         ):
             raise RuntimeError("укажи station_ip для {}".format(self.role))
+        if station_ip:
+            self.preflight_station(station_ip)
         if self.role == "uav2":
             self.servo.preflight()
         self.log.write(
@@ -293,8 +349,7 @@ class Mission:
     def run_uav1(self):
         self.enter("WAIT_START")
         self.led("blink", 255, 255, 0)
-        self.bus.status("READY")
-        self.bus.wait("START", self.timing["operator_timeout"])
+        self.wait_start()
 
         self.enter("TAKEOFF_YELLOW")
         self.takeoff(self.navigation["cruise_altitude"])
@@ -332,8 +387,7 @@ class Mission:
     def run_uav2(self):
         self.enter("WAIT_START")
         self.led("blink", 255, 255, 0)
-        self.bus.status("READY")
-        self.bus.wait("START", self.timing["operator_timeout"])
+        self.wait_start()
 
         self.enter("TAKEOFF_YELLOW")
         self.takeoff(self.navigation["cruise_altitude"])
@@ -392,6 +446,17 @@ class Mission:
 
     def enter(self, state):
         self.log.enter(state)
+
+    def wait_start(self):
+        while not rospy.is_shutdown():
+            self.bus.status("READY")
+            try:
+                self.bus.wait("START", 2.0)
+                return
+            except RuntimeError as error:
+                if str(error) != "timeout waiting for START":
+                    raise
+        raise RuntimeError("ROS shutdown while waiting for START")
 
     def _markers_callback(self, message):
         self.visible_markers = {marker.id for marker in message.markers}
@@ -482,6 +547,43 @@ class Mission:
 
         self.current_marker = marker_id
 
+    def preflight_station(self, station_ip):
+        expected_station = int(self.role_config["station_marker"])
+        request_id = str(uuid.uuid4())
+        self.bus.send(
+            station_ip,
+            45901,
+            "STATION_PING",
+            station="any",
+            expected_station=expected_station,
+            request_id=request_id,
+            reply_port=self.network["event_port"],
+        )
+        response = self.bus.wait(
+            "STATION_INFO",
+            self.timing["station_preflight_timeout"],
+            request_id=request_id,
+        )
+        actual_station = int(response.get("station", -1))
+        if actual_station != expected_station:
+            raise RuntimeError(
+                "на IP {} запущена станция {}, ожидалась {}".format(
+                    station_ip,
+                    actual_station,
+                    expected_station,
+                )
+            )
+        if response.get("target_color") != "red":
+            raise RuntimeError(
+                "станция {} настроена не на red".format(actual_station)
+            )
+        self.log.write(
+            "station_preflight_ok",
+            station=actual_station,
+            station_ip=station_ip,
+            target_color=response.get("target_color"),
+        )
+
     def navigate_wait(self, x, y, z, frame_id, auto_arm=False):
         self.navigate(
             x=x,
@@ -511,6 +613,8 @@ class Mission:
                 )
                 return
             rospy.sleep(0.2)
+        if rospy.is_shutdown():
+            raise RuntimeError("ROS shutdown during navigation")
         raise RuntimeError("navigation timeout")
 
     def land(self):
@@ -596,7 +700,7 @@ class Mission:
 def main(role=None):
     if role is None:
         raise SystemExit(
-            "Запусти demo_uav1.py или demo_uav2.py, не demo_mission.py"
+            "Запусти uav1.py или uav2.py, не mission.py"
         )
     config = load_config()
     mission = Mission(config, role)
@@ -605,10 +709,18 @@ def main(role=None):
         return 0
     except KeyboardInterrupt:
         mission.log.write("interrupted")
+        try:
+            mission.bus.status("INTERRUPTED")
+        except Exception:
+            pass
         mission.safe_land()
         return 130
     except Exception as error:
         mission.log.write("mission_failed", error=str(error))
+        try:
+            mission.bus.status("FAILED", error=str(error))
+        except Exception:
+            pass
         mission.safe_land()
         print("ERROR: {}".format(error), flush=True)
         return 1

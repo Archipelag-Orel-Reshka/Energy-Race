@@ -1,6 +1,6 @@
 {
   "team": "orel-reshka",
-  "station_id": 5,
+  "station_id": 37,
   "listen_ip": "0.0.0.0",
   "listen_port": 45901,
   "drone_event_port": 45900,

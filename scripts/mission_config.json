@@ -11,7 +11,7 @@
     "uav1": {
       "home_marker": 48,
       "station_marker": 37,
-      "station_ip": "SET_STATION_37_IP"
+      "station_ip": "192.168.0.224"
     },
     "uav2": {
       "home_marker": 27,
@@ -21,7 +21,7 @@
     }
   },
   "navigation": {
-    "cruise_altitude": 2.0,
+    "cruise_altitude": 2.5,
     "station_departure_height": 1.0,
     "speed": 0.35,
     "arrival_tolerance": 0.25,
@@ -32,6 +32,7 @@
   "timing": {
     "charge_seconds": 15.0,
     "green_seconds": 5.0,
+    "station_preflight_timeout": 5.0,
     "station_invitation_timeout": 45.0,
     "operator_timeout": 300.0
   },

@@ -114,6 +114,8 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(uav2["cruise_altitude"], 2.0)
         self.assertEqual(CONFIG["network"]["uav2_ip"], "192.168.0.192")
         self.assertEqual(CONFIG["timing"]["uav1_route_delay"], 5.0)
+        self.assertEqual(CONFIG["navigation"]["route_mode"], "direct")
+        self.assertEqual(CONFIG["navigation"]["speed"], 0.45)
 
     def test_preflight_rejects_non_free_station(self):
         mission = self.make_mission("uav1")
@@ -128,14 +130,74 @@ class MissionTests(unittest.TestCase):
                     "station": 5,
                     "target_color": "red",
                     "station_state": "reserved",
+                    "status_led_ok": True,
                 }
 
         mission.bus = StationBus()
         with self.assertRaisesRegex(RuntimeError, "не свободна: reserved"):
             mission.preflight_station("192.168.0.224")
 
-    def test_uav1_route_to_station(self):
+    def test_preflight_rejects_unavailable_station_led(self):
         mission = self.make_mission("uav1")
+        mission.network = {"event_port": 45900}
+
+        class StationBus(FakeBus):
+            def send(self, *args, **kwargs):
+                pass
+
+            def wait(self, *args, **kwargs):
+                return {
+                    "station": 5,
+                    "target_color": "red",
+                    "station_state": "free",
+                    "status_led_ok": False,
+                }
+
+        mission.bus = StationBus()
+        with self.assertRaisesRegex(RuntimeError, "LED-ленты"):
+            mission.preflight_station("192.168.0.224")
+
+    def test_uav1_uses_one_direct_leg_to_station(self):
+        mission = self.make_mission("uav1")
+        calls = []
+        mission.navigate_wait = lambda **kwargs: calls.append(kwargs)
+
+        mission.goto_marker(5)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            (calls[0]["x"], calls[0]["y"], calls[0]["z"]),
+            (5.0, 6.0, 2.0),
+        )
+        self.assertEqual(calls[0]["frame_id"], "aruco_map")
+        self.assertEqual(mission.bus.states, [])
+
+    def test_all_main_targets_use_one_direct_setpoint(self):
+        cases = (
+            ("uav1", 5, (5.0, 6.0, 2.0)),
+            ("uav1", 48, (6.0, 0.0, 2.0)),
+            ("uav2", 0, (0.0, 6.0, 2.0)),
+            ("uav2", 37, (2.0, 1.0, 2.0)),
+            ("uav2", 27, (6.0, 3.0, 2.0)),
+        )
+        for role, marker, expected in cases:
+            mission = self.make_mission(role)
+            calls = []
+            mission.navigate_wait = lambda **kwargs: calls.append(kwargs)
+
+            mission.goto_marker(marker)
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(
+                (calls[0]["x"], calls[0]["y"], calls[0]["z"]),
+                expected,
+            )
+            self.assertEqual(calls[0]["frame_id"], "aruco_map")
+
+    def test_grid_route_remains_available_as_fallback(self):
+        mission = self.make_mission("uav1")
+        mission.navigation = dict(mission.navigation)
+        mission.navigation["route_mode"] = "grid"
         calls = []
         mission.navigate_wait = lambda **kwargs: calls.append(kwargs)
 
@@ -146,8 +208,6 @@ class MissionTests(unittest.TestCase):
             for call in calls
         ]
         self.assertEqual(markers, [47, 40, 33, 26, 19, 12, 5])
-        self.assertEqual(mission.bus.states, [])
-        self.assertTrue(all(call["z"] == 2.0 for call in calls))
 
     def test_uav1_holds_five_seconds_before_station_route(self):
         mission = self.make_mission("uav1")
@@ -394,6 +454,7 @@ class StationConfigTests(unittest.TestCase):
             )
             self.assertEqual(config["station_id"], station_id)
             self.assertEqual(config["threshold_scale"], 0.5)
+            self.assertEqual(config["status_led"]["mode"], "ros")
             self.assertEqual(calibration["threshold"], calibrated_threshold)
             self.assertAlmostEqual(
                 calibration["threshold"] * config["threshold_scale"],

@@ -27,7 +27,8 @@
   "navigation": {
     "cruise_altitude": 2.0,
     "station_departure_height": 1.0,
-    "speed": 0.35,
+    "route_mode": "direct",
+    "speed": 0.45,
     "arrival_tolerance": 0.25,
     "station_arrival_tolerance": 0.15,
     "navigation_timeout": 45.0,

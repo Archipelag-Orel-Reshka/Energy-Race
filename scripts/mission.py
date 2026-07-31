@@ -619,13 +619,37 @@ class Mission:
         marker_id = int(marker_id)
         current_x, current_y = marker_position(self.current_marker)
         target_x, target_y = marker_position(marker_id)
+        route_mode = str(self.navigation.get("route_mode", "grid"))
         self.log.write(
             "goto_marker",
             marker=marker_id,
             x=target_x,
             y=target_y,
             z=self.cruise_altitude,
+            route_mode=route_mode,
         )
+
+        if route_mode == "direct":
+            self.log.write(
+                "route_direct",
+                from_marker=self.current_marker,
+                marker=marker_id,
+                x=target_x,
+                y=target_y,
+            )
+            self.navigate_wait(
+                x=target_x,
+                y=target_y,
+                z=self.cruise_altitude,
+                frame_id="aruco_map",
+            )
+            self.current_marker = marker_id
+            return
+
+        if route_mode != "grid":
+            raise RuntimeError(
+                "navigation.route_mode должен быть direct или grid"
+            )
 
         while current_x != target_x or current_y != target_y:
             if current_x != target_x:
@@ -725,12 +749,19 @@ class Mission:
                     station_state or "unknown",
                 )
             )
+        if response.get("status_led_ok") is not True:
+            raise RuntimeError(
+                "станция {} не подтвердила работу своей LED-ленты".format(
+                    actual_station
+                )
+            )
         self.log.write(
             "station_preflight_ok",
             station=actual_station,
             station_ip=station_ip,
             target_color=response.get("target_color"),
             station_state=station_state,
+            status_led_ok=True,
         )
 
     def navigate_wait(

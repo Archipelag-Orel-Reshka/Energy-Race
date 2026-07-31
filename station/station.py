@@ -205,6 +205,10 @@ class StatusLed:
         }
         self.led.color = colors[color]
 
+    @property
+    def available(self):
+        return self.led is not None
+
     def close(self):
         if self.led is not None:
             if self.mode == "ros":
@@ -324,6 +328,7 @@ class Station:
             request,
             target_color=self.config["target_color"],
             station_state=self.state,
+            status_led_ok=self.led.available,
         )
         self.log(
             "station_ping",
@@ -445,6 +450,7 @@ class Station:
             threshold=self.threshold,
             calibrated_threshold=self.calibrated_threshold,
             threshold_scale=self.threshold_scale,
+            status_led_ok=self.led.available,
             detection_rule="{} of {} frames".format(
                 DETECTION_REQUIRED_HITS, DETECTION_WINDOW_FRAMES
             ),

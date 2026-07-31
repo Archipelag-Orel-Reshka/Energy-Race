@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from collections import deque
 import datetime
 import json
 import socket
@@ -13,6 +14,10 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
+
+DETECTION_THRESHOLD_SCALE = 0.6
+DETECTION_WINDOW_FRAMES = 5
+DETECTION_REQUIRED_HITS = 3
 
 HSV_RANGES = {
     "red": [
@@ -216,11 +221,14 @@ class Station:
         self.config = config
         self.calibration = calibration
         self.station_id = int(config["station_id"])
-        self.threshold = float(calibration["threshold"])
+        self.calibrated_threshold = float(calibration["threshold"])
+        self.threshold = (
+            self.calibrated_threshold * DETECTION_THRESHOLD_SCALE
+        )
         self.pending = None
         self.state = "free"
         self.reservation_deadline = 0.0
-        self.high_since = None
+        self.detection_hits = deque(maxlen=DETECTION_WINDOW_FRAMES)
         self.last_score_log = 0.0
         self.led = StatusLed(config)
         self.camera = open_camera(config)
@@ -326,7 +334,7 @@ class Station:
             + float(self.config["request_timeout"]),
         }
         self.state = "pending"
-        self.high_since = None
+        self.detection_hits.clear()
         self.led.set("pending")
         self.log(
             "landing_requested",
@@ -360,7 +368,7 @@ class Station:
     def reset(self):
         self.pending = None
         self.state = "free"
-        self.high_since = None
+        self.detection_hits.clear()
         self.reservation_deadline = 0.0
         self.led.set("free")
 
@@ -372,13 +380,8 @@ class Station:
             self.last_score_log = now
             self.log("color_score", score=round(score, 6))
 
-        if score < self.threshold:
-            self.high_since = None
-            return
-        if self.high_since is None:
-            self.high_since = now
-            return
-        if now - self.high_since < float(self.config["stable_seconds"]):
+        self.detection_hits.append(score >= self.threshold)
+        if sum(self.detection_hits) < DETECTION_REQUIRED_HITS:
             return
 
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -403,7 +406,7 @@ class Station:
         self.reservation_deadline = (
             now + float(self.config["reservation_timeout"])
         )
-        self.high_since = None
+        self.detection_hits.clear()
         self.led.set("reserved")
 
     def run(self):
@@ -412,6 +415,10 @@ class Station:
             listen_port=self.config["listen_port"],
             target_color=self.config["target_color"],
             threshold=self.threshold,
+            calibrated_threshold=self.calibrated_threshold,
+            detection_rule="{} of {} frames".format(
+                DETECTION_REQUIRED_HITS, DETECTION_WINDOW_FRAMES
+            ),
         )
         while True:
             self.receive_messages()

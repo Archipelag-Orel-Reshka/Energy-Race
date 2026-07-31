@@ -1,50 +1,69 @@
 #!/usr/bin/env python3
 
+import os
 import time
+from pathlib import Path
 
-import pigpio
 
-
-PIN = 27
-CENTER = 1500
-DOWN = 1300
-UP = 1700
+PWM = Path("/sys/class/pwm/pwmchip0/pwm0")
+PERIOD = 20_000_000
+CENTER = 1_500_000
+DOWN = 1_300_000
+UP = 1_700_000
 
 
 print("MG995: коричневый=GND, красный=5-6 В, жёлтый/оранжевый=PWM_0.")
 print("GND питания серво и GND Orange Pi должны быть общими.")
 print("Сними груз и освободи ход палочки.")
 
+if os.geteuid() != 0:
+    raise SystemExit("Запусти: sudo python3 servo.py")
+
 if input("Для теста введи SERVO: ").strip() != "SERVO":
     raise SystemExit("Тест отменён")
 
-pi = pigpio.pi()
-if not pi.connected:
-    raise SystemExit(
-        "pigpiod недоступен. Запусти: sudo systemctl enable --now pigpiod.service"
-    )
+if not PWM.exists():
+    raise SystemExit("{} не найден".format(PWM))
+
+
+def read(name):
+    return (PWM / name).read_text(encoding="utf-8").strip()
+
+
+def write(name, value):
+    (PWM / name).write_text(str(value), encoding="utf-8")
+
 
 try:
-    pi.set_mode(PIN, pigpio.OUTPUT)
+    if read("enable") == "1":
+        write("enable", 0)
+    if read("polarity") != "normal":
+        write("polarity", "normal")
+    if int(read("period")) != PERIOD:
+        write("period", PERIOD)
+    write("duty_cycle", CENTER)
+    write("enable", 1)
+
+    print(
+        "PWM включён: period={}, polarity={}, enable={}".format(
+            read("period"), read("polarity"), read("enable")
+        )
+    )
     for name, pulse in (
         ("центр", CENTER),
         ("вниз", DOWN),
         ("вверх", UP),
         ("центр", CENTER),
     ):
-        result = pi.set_servo_pulsewidth(PIN, pulse)
-        if result < 0:
-            raise RuntimeError(
-                "pigpio не установил импульс {} мкс: код {}".format(
-                    pulse, result
-                )
-            )
-        print("{}: {} мкс".format(name, pulse), flush=True)
+        write("duty_cycle", pulse)
+        print("{}: {} нс".format(name, pulse), flush=True)
         time.sleep(2.0)
 finally:
     try:
-        pi.set_servo_pulsewidth(PIN, 0)
+        write("duty_cycle", CENTER)
+        time.sleep(0.3)
     finally:
-        pi.stop()
+        if read("enable") == "1":
+            write("enable", 0)
 
 print("Готово. Управляющие импульсы выключены.")

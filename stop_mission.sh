@@ -55,7 +55,7 @@ case "$cmdline" in
         ;;
 esac
 
-kill -INT "$pid"
+kill -TERM "$pid"
 for _ in 1 2 3 4 5; do
     if ! kill -0 "$pid" 2>/dev/null; then
         rm -f "$pid_file"
@@ -70,7 +70,15 @@ exit 1
 REMOTE
 }
 
-stop_remote "$UAV1_HOST" "uav1" "uav1.py"
-stop_remote "$UAV2_HOST" "uav2" "uav2.py"
-stop_remote "$STATION5_HOST" "station-5" "station.py"
-stop_remote "$STATION37_HOST" "station-37" "station.py"
+failures=0
+stop_remote "$UAV1_HOST" "uav1" "uav1.py" || failures=$((failures + 1))
+stop_remote "$UAV2_HOST" "uav2" "uav2.py" || failures=$((failures + 1))
+stop_remote "$STATION5_HOST" "station-5" "station.py" || failures=$((failures + 1))
+stop_remote "$STATION37_HOST" "station-37" "station.py" || failures=$((failures + 1))
+
+if [ "$failures" -ne 0 ]; then
+    echo "WARNING: не удалось подтвердить остановку на $failures устройствах." >&2
+    exit 1
+fi
+
+echo "Все процессы, запущенные mission.sh, остановлены или уже завершены."

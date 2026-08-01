@@ -4,12 +4,13 @@ import sys
 import time
 
 import rospy
-from led_msgs.msg import LEDState, LEDStateArray
+from led_msgs.msg import LEDState
 from led_msgs.srv import SetLEDs
 from technic.srv import GetTelemetry, SetLEDEffect
 
 
 TEST_SECONDS = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
+LED_COUNT = 72
 
 
 def main():
@@ -30,19 +31,13 @@ def main():
     if telemetry.armed:
         raise RuntimeError("БВС armed: тест LED разрешён только на земле")
 
-    state = rospy.wait_for_message(
-        "led/state", LEDStateArray, timeout=5
-    )
-    if not state.leds:
-        raise RuntimeError("led/state не содержит светодиодов")
-
-    middle = len(state.leds) // 2
-    colors = []
-    for position, current in enumerate(state.leds):
-        if position < middle:
-            colors.append(LEDState(current.index, 255, 0, 0))
-        else:
-            colors.append(LEDState(current.index, 0, 0, 255))
+    middle = LED_COUNT // 2
+    colors = [
+        LEDState(index, 255, 0, 0)
+        if index < middle
+        else LEDState(index, 0, 0, 255)
+        for index in range(LED_COUNT)
+    ]
 
     try:
         set_leds(colors)

@@ -111,6 +111,9 @@ class MissionTests(unittest.TestCase):
         mission.cruise_altitude = float(
             mission.role_config["cruise_altitude"]
         )
+        mission.return_altitude = float(
+            mission.navigation["return_altitude"]
+        )
         mission.station_detection_altitude = float(
             mission.navigation["station_detection_altitude"]
         )
@@ -151,11 +154,19 @@ class MissionTests(unittest.TestCase):
             CONFIG["navigation"]["station_departure_height"],
             2.0,
         )
+        self.assertEqual(CONFIG["navigation"]["return_altitude"], 2.5)
         self.assertEqual(CONFIG["navigation"]["station_speed"], 0.25)
         self.assertEqual(
             CONFIG["navigation"]["station_arrival_tolerance"],
             0.1,
         )
+        self.assertEqual(
+            CONFIG["navigation"]["station_relaxed_tolerance"],
+            0.2,
+        )
+        self.assertEqual(CONFIG["navigation"]["station_center_timeout"], 15.0)
+        self.assertEqual(uav2["station_arrival_tolerance"], 0.18)
+        self.assertEqual(uav2["station_relaxed_tolerance"], 0.35)
         self.assertEqual(CONFIG["navigation"]["route_mode"], "direct")
         self.assertEqual(CONFIG["navigation"]["speed"], 0.45)
         self.assertEqual(CONFIG["led"]["count"], 72)
@@ -328,6 +339,24 @@ class MissionTests(unittest.TestCase):
             )
             self.assertEqual(calls[0]["frame_id"], "aruco_map")
 
+    def test_return_targets_use_2_5_meter_setpoint(self):
+        for role, marker, expected_xy in (
+            ("uav1", 48, (6.0, 0.0)),
+            ("uav2", 27, (6.0, 3.0)),
+        ):
+            mission = self.make_mission(role)
+            calls = []
+            mission.navigate_wait = lambda **kwargs: calls.append(kwargs)
+
+            mission.goto_marker(marker, altitude=mission.return_altitude)
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(
+                (calls[0]["x"], calls[0]["y"], calls[0]["z"]),
+                expected_xy + (2.5,),
+            )
+            self.assertEqual(calls[0]["frame_id"], "aruco_map")
+
     def test_grid_route_remains_available_as_fallback(self):
         mission = self.make_mission("uav1")
         mission.navigation = dict(mission.navigation)
@@ -418,9 +447,9 @@ class MissionTests(unittest.TestCase):
         )
 
     def test_station_centering_uses_precise_tolerance(self):
-        for role, expected in (
-            ("uav1", (5.0, 6.0, 1.8)),
-            ("uav2", (2.0, 1.0, 1.8)),
+        for role, expected, strict, relaxed in (
+            ("uav1", (5.0, 6.0, 1.8), 0.1, 0.2),
+            ("uav2", (2.0, 1.0, 1.8), 0.18, 0.35),
         ):
             mission = self.make_mission(role)
             mission.timing["station_hold_seconds"] = 0.0
@@ -433,13 +462,16 @@ class MissionTests(unittest.TestCase):
                 (calls[0]["x"], calls[0]["y"], calls[0]["z"]),
                 expected,
             )
-            self.assertEqual(calls[0]["arrival_tolerance"], 0.1)
+            self.assertEqual(calls[0]["arrival_tolerance"], strict)
+            self.assertEqual(calls[0]["timeout_tolerance"], relaxed)
+            self.assertEqual(calls[0]["timeout"], 15.0)
+            self.assertEqual(calls[0]["context"], "station_center")
             self.assertEqual(calls[0]["speed"], 0.25)
 
     def test_both_uavs_recenter_and_hold_after_land_grant(self):
-        for role, station, expected in (
-            ("uav1", 5, (5.0, 6.0, 1.8)),
-            ("uav2", 37, (2.0, 1.0, 1.8)),
+        for role, station, expected, strict, relaxed in (
+            ("uav1", 5, (5.0, 6.0, 1.8), 0.1, 0.2),
+            ("uav2", 37, (2.0, 1.0, 1.8), 0.18, 0.35),
         ):
             mission = self.make_mission(role)
             mission.timing["station_post_grant_hold_seconds"] = 0.0
@@ -454,7 +486,13 @@ class MissionTests(unittest.TestCase):
                 expected,
             )
             self.assertEqual(calls[0]["frame_id"], "aruco_map")
-            self.assertEqual(calls[0]["arrival_tolerance"], 0.1)
+            self.assertEqual(calls[0]["arrival_tolerance"], strict)
+            self.assertEqual(calls[0]["timeout_tolerance"], relaxed)
+            self.assertEqual(calls[0]["timeout"], 15.0)
+            self.assertEqual(
+                calls[0]["context"],
+                "station_post_permission_center",
+            )
             self.assertEqual(calls[0]["speed"], 0.25)
             self.assertIn(
                 (
@@ -462,12 +500,50 @@ class MissionTests(unittest.TestCase):
                     {
                         "station": station,
                         "altitude": 1.8,
+                        "tolerance": strict,
+                        "relaxed_tolerance": relaxed,
                         "hold_seconds": 0.0,
                         "permission_granted": True,
                     },
                 ),
                 mission.log.events,
             )
+
+    def test_uav2_station_centering_reaches_detection_after_relaxed_arrival(self):
+        mission = self.make_mission("uav2")
+        clock = [0.0]
+        original_monotonic = MISSION.time.monotonic
+        original_sleep = ROS.sleep
+        mission.navigate = lambda **_kwargs: None
+        mission.get_telemetry = lambda **_kwargs: types.SimpleNamespace(
+            x=0.24,
+            y=0.0,
+            z=0.0,
+        )
+        MISSION.time.monotonic = lambda: clock[0]
+        ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        try:
+            mission.navigate_wait(
+                x=2.0,
+                y=1.0,
+                z=1.8,
+                frame_id="aruco_map",
+                arrival_tolerance=0.18,
+                timeout=1.0,
+                timeout_tolerance=0.35,
+                context="station_center",
+            )
+        finally:
+            MISSION.time.monotonic = original_monotonic
+            ROS.sleep = original_sleep
+
+        relaxed = [
+            data for event, data in mission.log.events
+            if event == "navigate_arrived_relaxed"
+        ]
+        self.assertEqual(len(relaxed), 1)
+        self.assertEqual(relaxed[0]["context"], "station_center")
+        self.assertEqual(relaxed[0]["distance"], 0.24)
 
     def test_station_hold_keeps_setpoint_without_unreliable_telemetry(self):
         mission = self.make_mission("uav1")
@@ -580,6 +656,53 @@ class MissionTests(unittest.TestCase):
             events.index(("STABILIZED", True)),
             events.index("STATION_LAND_CALLED"),
         )
+
+    def test_full_role_flows_use_raised_return_and_release_uav2_cargo(self):
+        for role, home_marker in (("uav1", 48), ("uav2", 27)):
+            mission = self.make_mission(role)
+            events = []
+            routes = []
+            mission.enter = lambda state: events.append(("state", state))
+            mission.led = lambda *_args: None
+            mission.wait_start = lambda: None
+            mission.takeoff = lambda height: events.append(("takeoff", height))
+            mission.wait_any_marker = lambda: None
+            mission.hold_before_station_route = lambda: None
+            mission.goto_marker = lambda marker, altitude=None: routes.append(
+                (marker, altitude)
+            )
+            mission.center_on_station = lambda: None
+            mission.await_station_permission = lambda: True
+            mission.stabilize_after_land_grant = lambda _permission: None
+            mission.land = lambda: events.append(("land", None))
+            mission.notify_station = lambda event: events.append(
+                ("station", event)
+            )
+            mission.charge = lambda: None
+            mission.bus.wait = lambda *_args, **_kwargs: None
+            mission.half_red_blue = lambda: events.append(("led", "half"))
+            mission.try_servo_action = lambda action: (
+                events.append(("servo", action)) or True
+            )
+
+            if role == "uav1":
+                mission.run_uav1()
+            else:
+                mission.run_uav2()
+
+            self.assertEqual(routes[-1], (home_marker, 2.5))
+            if role == "uav2":
+                self.assertEqual(
+                    [event for event in events if event[0] == "servo"],
+                    [
+                        ("servo", "close_grip"),
+                        ("servo", "open_grip"),
+                    ],
+                )
+                self.assertLess(
+                    events.index(("servo", "open_grip")),
+                    events.index(("led", "half")),
+                )
 
     def test_ssh_disconnect_and_sigterm_install_safe_handlers(self):
         registrations = []

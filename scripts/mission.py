@@ -379,6 +379,14 @@ class Mission:
                 "station_detection_altitude должен быть в диапазоне "
                 "0.5..cruise_altitude"
             )
+        self.return_altitude = float(self.navigation.get(
+            "return_altitude",
+            self.cruise_altitude,
+        ))
+        if self.return_altitude < self.cruise_altitude:
+            raise RuntimeError(
+                "return_altitude должен быть не ниже cruise_altitude"
+            )
         self.station_mode = str(self.role_config.get(
             "station_mode",
             "real" if self.role_config.get("station_ip") else "virtual",
@@ -476,6 +484,7 @@ class Mission:
             station_ip=station_ip or "virtual",
             station_mode=self.station_mode,
             cruise_altitude=self.cruise_altitude,
+            return_altitude=self.return_altitude,
         )
 
     def run(self):
@@ -520,7 +529,10 @@ class Mission:
         self.led("blink", 0, 255, 0)
         self.takeoff(self.navigation["station_departure_height"])
         self.notify_station("STATION_RELEASED")
-        self.goto_marker(self.role_config["home_marker"])
+        self.goto_marker(
+            self.role_config["home_marker"],
+            altitude=self.return_altitude,
+        )
 
         self.enter("LAND_HOME")
         self.land()
@@ -580,7 +592,10 @@ class Mission:
         self.half_red_blue()
         self.takeoff(self.navigation["station_departure_height"])
         self.notify_station("STATION_RELEASED")
-        self.goto_marker(self.role_config["home_marker"])
+        self.goto_marker(
+            self.role_config["home_marker"],
+            altitude=self.return_altitude,
+        )
 
         self.enter("LAND_HOME")
         self.land()
@@ -710,8 +725,13 @@ class Mission:
             auto_arm=True,
         )
 
-    def goto_marker(self, marker_id):
+    def goto_marker(self, marker_id, altitude=None):
         marker_id = int(marker_id)
+        target_altitude = (
+            self.cruise_altitude
+            if altitude is None
+            else float(altitude)
+        )
         current_x, current_y = marker_position(self.current_marker)
         target_x, target_y = marker_position(marker_id)
         route_mode = str(self.navigation.get("route_mode", "grid"))
@@ -720,7 +740,7 @@ class Mission:
             marker=marker_id,
             x=target_x,
             y=target_y,
-            z=self.cruise_altitude,
+            z=target_altitude,
             route_mode=route_mode,
         )
 
@@ -731,11 +751,12 @@ class Mission:
                 marker=marker_id,
                 x=target_x,
                 y=target_y,
+                z=target_altitude,
             )
             self.navigate_wait(
                 x=target_x,
                 y=target_y,
-                z=self.cruise_altitude,
+                z=target_altitude,
                 frame_id="aruco_map",
             )
             self.current_marker = marker_id
@@ -758,11 +779,12 @@ class Mission:
                 marker=waypoint_marker,
                 x=current_x,
                 y=current_y,
+                z=target_altitude,
             )
             self.navigate_wait(
                 x=current_x,
                 y=current_y,
-                z=self.cruise_altitude,
+                z=target_altitude,
                 frame_id="aruco_map",
             )
         self.current_marker = marker_id
@@ -771,15 +793,24 @@ class Mission:
         station_id = int(self.role_config["station_marker"])
         target_x, target_y = marker_position(station_id)
         self.enter("CENTER_ABOVE_STATION")
+        strict_tolerance = float(self.role_config.get(
+            "station_arrival_tolerance",
+            self.navigation["station_arrival_tolerance"],
+        ))
+        relaxed_tolerance = float(self.role_config.get(
+            "station_relaxed_tolerance",
+            self.navigation["station_relaxed_tolerance"],
+        ))
         self.navigate_wait(
             x=target_x,
             y=target_y,
             z=self.station_detection_altitude,
             frame_id="aruco_map",
-            arrival_tolerance=float(
-                self.navigation["station_arrival_tolerance"]
-            ),
+            arrival_tolerance=strict_tolerance,
             speed=float(self.navigation["station_speed"]),
+            timeout=float(self.navigation["station_center_timeout"]),
+            timeout_tolerance=relaxed_tolerance,
+            context="station_center",
         )
 
         hold_seconds = float(self.timing["station_hold_seconds"])
@@ -788,6 +819,8 @@ class Mission:
             "station_centered",
             station=station_id,
             altitude=self.station_detection_altitude,
+            tolerance=strict_tolerance,
+            relaxed_tolerance=relaxed_tolerance,
             hold_seconds=hold_seconds,
         )
 
@@ -803,15 +836,24 @@ class Mission:
             else "STABILIZE_FALLBACK_LANDING"
         )
         self.enter(state)
+        strict_tolerance = float(self.role_config.get(
+            "station_arrival_tolerance",
+            self.navigation["station_arrival_tolerance"],
+        ))
+        relaxed_tolerance = float(self.role_config.get(
+            "station_relaxed_tolerance",
+            self.navigation["station_relaxed_tolerance"],
+        ))
         self.navigate_wait(
             x=target_x,
             y=target_y,
             z=self.station_detection_altitude,
             frame_id="aruco_map",
-            arrival_tolerance=float(
-                self.navigation["station_arrival_tolerance"]
-            ),
+            arrival_tolerance=strict_tolerance,
             speed=float(self.navigation["station_speed"]),
+            timeout=float(self.navigation["station_center_timeout"]),
+            timeout_tolerance=relaxed_tolerance,
+            context="station_post_permission_center",
         )
 
         self.hold_station_target(hold_seconds)
@@ -819,6 +861,8 @@ class Mission:
             "post_grant_stabilized",
             station=station_id,
             altitude=self.station_detection_altitude,
+            tolerance=strict_tolerance,
+            relaxed_tolerance=relaxed_tolerance,
             hold_seconds=hold_seconds,
             permission_granted=bool(permission_granted),
         )
@@ -966,6 +1010,9 @@ class Mission:
         auto_arm=False,
         arrival_tolerance=None,
         speed=None,
+        timeout=None,
+        timeout_tolerance=None,
+        context="navigation",
     ):
         self.navigate(
             x=x,
@@ -978,14 +1025,19 @@ class Mission:
             frame_id=frame_id,
             auto_arm=auto_arm,
         )
-        deadline = time.monotonic() + float(
+        navigation_timeout = float(
             self.navigation["navigation_timeout"]
+            if timeout is None
+            else timeout
         )
+        deadline = time.monotonic() + navigation_timeout
         tolerance = (
             float(self.navigation["arrival_tolerance"])
             if arrival_tolerance is None
             else float(arrival_tolerance)
         )
+        last_distance = None
+        best_distance = None
         while time.monotonic() < deadline and not rospy.is_shutdown():
             telemetry = self.get_telemetry(frame_id="navigate_target")
             distance = math.sqrt(
@@ -993,6 +1045,10 @@ class Mission:
                 + telemetry.y ** 2
                 + telemetry.z ** 2
             )
+            if math.isfinite(distance):
+                last_distance = distance
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
             if (
                 math.isfinite(distance)
                 and distance < tolerance
@@ -1006,7 +1062,40 @@ class Mission:
             rospy.sleep(0.2)
         if rospy.is_shutdown():
             raise RuntimeError("ROS shutdown during navigation")
-        raise RuntimeError("navigation timeout")
+        if (
+            timeout_tolerance is not None
+            and last_distance is not None
+            and last_distance < float(timeout_tolerance)
+        ):
+            self.log.write(
+                "navigate_arrived_relaxed",
+                context=context,
+                distance=round(last_distance, 3),
+                tolerance=tolerance,
+                relaxed_tolerance=float(timeout_tolerance),
+                timeout=navigation_timeout,
+            )
+            return
+        self.log.write(
+            "navigation_timeout",
+            context=context,
+            distance=(
+                None if last_distance is None else round(last_distance, 3)
+            ),
+            best_distance=(
+                None if best_distance is None else round(best_distance, 3)
+            ),
+            tolerance=tolerance,
+            timeout=navigation_timeout,
+        )
+        raise RuntimeError(
+            "navigation timeout: {}; distance={}".format(
+                context,
+                "unknown"
+                if last_distance is None
+                else round(last_distance, 3),
+            )
+        )
 
     def land(self):
         started = time.monotonic()

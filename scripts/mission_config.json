@@ -21,18 +21,23 @@
       "station_marker": 37,
       "station_mode": "real",
       "station_ip": "192.168.0.239",
-      "cruise_altitude": 2.0
+      "cruise_altitude": 2.0,
+      "station_arrival_tolerance": 0.18,
+      "station_relaxed_tolerance": 0.35
     }
   },
   "navigation": {
     "cruise_altitude": 2.0,
     "station_detection_altitude": 1.8,
     "station_departure_height": 2.0,
+    "return_altitude": 2.5,
     "route_mode": "direct",
     "speed": 0.45,
     "station_speed": 0.25,
     "arrival_tolerance": 0.25,
     "station_arrival_tolerance": 0.1,
+    "station_relaxed_tolerance": 0.2,
+    "station_center_timeout": 15.0,
     "navigation_timeout": 45.0,
     "marker_timeout": 10.0,
     "landing_timeout": 45.0,

@@ -582,11 +582,7 @@ class Mission:
         self.notify_station("LANDED")
         self.bus.status("STATION_LANDED")
 
-        self.charge()
-
-        self.enter("RELEASE_CARGO_RED_BLINK")
-        self.led("blink", 255, 0, 0)
-        self.try_servo_action("open_grip")
+        self.charge(release_cargo=True)
 
         self.enter("RETURN_HOME_HALF_RED_BLUE")
         self.half_red_blue()
@@ -1214,12 +1210,22 @@ class Mission:
             request_id=self.station_request_id,
         )
 
-    def charge(self):
-        total = float(self.timing["charge_seconds"])
+    def charge(self, release_cargo=False):
+        red_seconds = float(self.timing["charge_seconds"])
         green = float(self.timing["green_seconds"])
-        red_until = time.monotonic() + total - green
-        self.enter("CHARGING_RED_BLINK")
+        red_until = time.monotonic() + red_seconds
+        self.enter(
+            "CHARGING_RED_BLINK_RELEASE_CARGO"
+            if release_cargo
+            else "CHARGING_RED_BLINK"
+        )
         self.led("blink", 255, 0, 0)
+        if release_cargo:
+            self.log.write(
+                "cargo_release_during_charge",
+                red_blink_seconds=red_seconds,
+            )
+            self.try_servo_action("open_grip")
         while time.monotonic() < red_until:
             rospy.sleep(0.1)
 
@@ -1228,7 +1234,12 @@ class Mission:
         deadline = red_until + green
         while time.monotonic() < deadline:
             rospy.sleep(0.1)
-        self.log.write("charging_done", seconds=total)
+        self.log.write(
+            "charging_done",
+            seconds=red_seconds + green,
+            red_blink_seconds=red_seconds,
+            green_seconds=green,
+        )
 
     def safe_land(self):
         if not self.flight_active:

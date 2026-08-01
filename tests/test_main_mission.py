@@ -446,6 +446,60 @@ class MissionTests(unittest.TestCase):
             ],
         )
 
+    def test_regulation_outbound_led_sequences(self):
+        class StopSequence(Exception):
+            pass
+
+        uav1 = self.make_mission("uav1")
+        uav1_leds = []
+        uav1.enter = lambda _state: None
+        uav1.led = lambda effect, red, green, blue: uav1_leds.append(
+            (effect, red, green, blue)
+        )
+        uav1.wait_start = lambda: None
+        uav1.takeoff = lambda _height: None
+        uav1.wait_any_marker = lambda: None
+        uav1.hold_before_station_route = lambda: None
+        uav1.goto_marker = lambda _marker: (_ for _ in ()).throw(
+            StopSequence()
+        )
+        with self.assertRaises(StopSequence):
+            uav1.run_uav1()
+        self.assertEqual(
+            uav1_leds,
+            [
+                ("blink", 255, 255, 0),
+                ("fill", 255, 0, 0),
+            ],
+        )
+
+        uav2 = self.make_mission("uav2")
+        uav2_leds = []
+        uav2.enter = lambda _state: None
+        uav2.led = lambda effect, red, green, blue: uav2_leds.append(
+            (effect, red, green, blue)
+        )
+        uav2.wait_start = lambda: None
+        uav2.takeoff = lambda _height: None
+        uav2.wait_any_marker = lambda: None
+        uav2.goto_marker = lambda _marker: None
+        uav2.land = lambda: None
+        uav2.bus.status = lambda state, **_extra: (
+            (_ for _ in ()).throw(StopSequence())
+            if state == "CARGO_LANDED"
+            else None
+        )
+        with self.assertRaises(StopSequence):
+            uav2.run_uav2()
+        self.assertEqual(
+            uav2_leds,
+            [
+                ("blink", 255, 255, 0),
+                ("blink", 255, 255, 0),
+                ("fill", 255, 0, 0),
+            ],
+        )
+
     def test_station_centering_uses_precise_tolerance(self):
         for role, expected, strict, relaxed in (
             ("uav1", (5.0, 6.0, 1.8), 0.1, 0.2),
@@ -678,7 +732,12 @@ class MissionTests(unittest.TestCase):
             mission.notify_station = lambda event: events.append(
                 ("station", event)
             )
-            mission.charge = lambda: None
+            def charge(release_cargo=False):
+                events.append(("charge", release_cargo))
+                if release_cargo:
+                    mission.try_servo_action("open_grip")
+
+            mission.charge = charge
             mission.bus.wait = lambda *_args, **_kwargs: None
             mission.half_red_blue = lambda: events.append(("led", "half"))
             mission.try_servo_action = lambda action: (
@@ -699,6 +758,7 @@ class MissionTests(unittest.TestCase):
                         ("servo", "open_grip"),
                     ],
                 )
+                self.assertIn(("charge", True), events)
                 self.assertLess(
                     events.index(("servo", "open_grip")),
                     events.index(("led", "half")),
@@ -969,11 +1029,48 @@ class MissionTests(unittest.TestCase):
             ],
         )
         self.assertAlmostEqual(indications[0][4], 0.0)
-        self.assertAlmostEqual(indications[1][4], 10.1)
+        self.assertGreaterEqual(indications[1][4], 15.0)
+        self.assertLess(indications[1][4], 15.2)
         self.assertEqual(states[0], ("CHARGING_RED_BLINK", 0.0))
         self.assertEqual(states[1][0], "CHARGING_GREEN")
-        self.assertAlmostEqual(states[1][1], 10.1)
-        self.assertGreaterEqual(clock[0], 15.0)
+        self.assertGreaterEqual(states[1][1], 15.0)
+        self.assertLess(states[1][1], 15.2)
+        self.assertGreaterEqual(clock[0], 20.0)
+
+    def test_uav2_releases_cargo_during_red_charge_phase(self):
+        mission = self.make_mission("uav2")
+        clock = [0.0]
+        indications = []
+        actions = []
+        states = []
+        original_monotonic = MISSION.time.monotonic
+        original_sleep = ROS.sleep
+        mission.enter = lambda state: states.append((state, clock[0]))
+        mission.led = lambda effect, red, green, blue: indications.append(
+            (effect, red, green, blue, clock[0])
+        )
+        mission.try_servo_action = lambda action: (
+            actions.append((action, clock[0], indications[-1][:4])) or True
+        )
+        MISSION.time.monotonic = lambda: clock[0]
+        ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        try:
+            mission.charge(release_cargo=True)
+        finally:
+            MISSION.time.monotonic = original_monotonic
+            ROS.sleep = original_sleep
+
+        self.assertEqual(
+            states[0],
+            ("CHARGING_RED_BLINK_RELEASE_CARGO", 0.0),
+        )
+        self.assertEqual(
+            actions,
+            [("open_grip", 0.0, ("blink", 255, 0, 0))],
+        )
+        self.assertEqual(indications[1][:4], ("fill", 0, 255, 0))
+        self.assertGreaterEqual(indications[1][4], 15.0)
+        self.assertGreaterEqual(clock[0], 20.0)
 
     def test_gpio_servo_matches_calibrated_values(self):
         servo = MISSION.Servo(CONFIG["servo"], FakeLog())

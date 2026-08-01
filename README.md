@@ -208,6 +208,26 @@ cd /home/mavxa/zed/ros2/Energy-Race
 ./stop_mission.sh  # только после landed/disarmed
 ```
 
+#### Windows (PowerShell)
+
+Аналогичные скрипты для ноутбука под Windows — `update_all.ps1`, `mission.ps1`,
+`stop_mission.ps1`. Удалённый bash-код бордов остаётся без изменений (он
+передаётся на Linux-борды через SSH stdin), меняется только локальная логика.
+Для запуска из любого шелла есть `.cmd`-обёртки:
+
+```powershell
+cd C:\Users\Администратор\Desktop\Energy-Race
+
+.\update_all.cmd    # тесты и загрузка файлов на 2 БВС + 2 станции
+.\mission.cmd       # станции, uav1/uav2, затем локальный control.py
+.\stop_mission.cmd  # только после landed/disarmed
+```
+
+Команды `ssh`, `scp` и `python` должны быть в `PATH` (OpenSSH встроен в Windows
+10/11, Python ставится отдельно). SSH-опции `ControlMaster`/`ControlPath`
+опущены — они не поддерживаются Windows OpenSSH; `ConnectTimeout` и
+`ServerAlive*` сохранены.
+
 Фиксированная полевая топология основной миссии:
 
 - БВС-1 — `192.168.0.29`;

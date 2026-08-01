@@ -455,6 +455,55 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('kill -TERM "$pid"', stopper)
         self.assertNotIn('kill -KILL "$pid"', stopper)
 
+    # -- PowerShell (Windows) launcher counterparts --------------------------
+
+    def test_ps1_remote_uav_launch_loads_interactive_ros_environment(self):
+        launcher = (ROOT / "mission.ps1").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'printf -v launch_command \'exec python3 -u %q\' "$script"',
+            launcher,
+        )
+        self.assertIn('nohup bash -ic "$launch_command"', launcher)
+
+    def test_ps1_launch_and_stop_quote_remote_arguments(self):
+        launcher = (ROOT / "mission.ps1").read_text(encoding="utf-8")
+        stopper = (ROOT / "stop_mission.ps1").read_text(encoding="utf-8")
+
+        # The remote bash snippets are embedded in here-strings; the same
+        # safety invariants must hold.
+        self.assertIn('kill -TERM "$pid"', stopper)
+        self.assertNotIn('kill -KILL "$pid"', stopper)
+
+    def test_ps1_scripts_normalise_crlf_before_ssh(self):
+        """CRLF would break the remote bash; every .ps1 must strip CR."""
+        for name in ("mission.ps1", "stop_mission.ps1", "update_all.ps1"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn('-replace "`r`n", "`n"', text)
+
+    def test_ps1_mission_uses_python_for_local_control(self):
+        launcher = (ROOT / "mission.ps1").read_text(encoding="utf-8")
+
+        # Remote boards still use python3, but the local control.py call on
+        # Windows must go through the python command found by Find-Python.
+        self.assertIn("Find-Python", launcher)
+        self.assertIn("control.py", launcher)
+
+    def test_ps1_update_all_runs_local_tests_and_deploys(self):
+        updater = (ROOT / "update_all.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("compileall", updater)
+        self.assertIn("unittest discover", updater)
+        self.assertIn("Deploy-Station", updater)
+        self.assertIn("station_id", updater)
+
+    def test_cmd_wrappers_call_powershell_scripts(self):
+        for stem in ("mission", "stop_mission", "update_all"):
+            wrapper = (ROOT / (stem + ".cmd")).read_text(encoding="utf-8")
+            self.assertIn(stem + ".ps1", wrapper)
+            self.assertIn("ExecutionPolicy Bypass", wrapper)
+
+
 
 class StationConfigTests(unittest.TestCase):
     def test_calibrations_and_sensitivity(self):

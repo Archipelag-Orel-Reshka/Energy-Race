@@ -436,6 +436,26 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(sleeps, [])
 
 
+class LauncherTests(unittest.TestCase):
+    def test_remote_uav_launch_loads_interactive_ros_environment(self):
+        launcher = (ROOT / "mission.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'printf -v launch_command \'exec python3 -u %q\' "$script"',
+            launcher,
+        )
+        self.assertIn('nohup bash -ic "$launch_command"', launcher)
+
+    def test_launch_and_stop_quote_remote_arguments(self):
+        launcher = (ROOT / "mission.sh").read_text(encoding="utf-8")
+        stopper = (ROOT / "stop_mission.sh").read_text(encoding="utf-8")
+
+        self.assertIn("printf -v remote_command", launcher)
+        self.assertIn("printf -v remote_command", stopper)
+        self.assertIn('kill -TERM "$pid"', stopper)
+        self.assertNotIn('kill -KILL "$pid"', stopper)
+
+
 class StationConfigTests(unittest.TestCase):
     def test_calibrations_and_sensitivity(self):
         cases = (

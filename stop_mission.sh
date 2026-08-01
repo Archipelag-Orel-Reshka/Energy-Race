@@ -26,9 +26,11 @@ stop_remote() {
     local host="$1"
     local label="$2"
     local script="$3"
+    local remote_command
 
-    ssh "${SSH_OPTIONS[@]}" "$host" bash -s -- \
-        "$label" "$script" <<'REMOTE'
+    printf -v remote_command 'bash -s -- %q %q' "$label" "$script"
+
+    ssh "${SSH_OPTIONS[@]}" "$host" "$remote_command" <<'REMOTE'
 set -eu
 label="$1"
 script="$2"

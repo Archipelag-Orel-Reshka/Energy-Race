@@ -39,10 +39,13 @@ start_remote() {
     local label="$2"
     local script="$3"
     local allow_existing="$4"
+    local remote_command
+
+    printf -v remote_command 'bash -s -- %q %q %q' \
+        "$label" "$script" "$allow_existing"
 
     echo "[$label] проверка $host"
-    ssh "${SSH_OPTIONS[@]}" "$host" bash -s -- \
-        "$label" "$script" "$allow_existing" <<'REMOTE'
+    ssh "${SSH_OPTIONS[@]}" "$host" "$remote_command" <<'REMOTE'
 set -eu
 
 label="$1"
@@ -95,7 +98,10 @@ fi
 
 stamp="$(date +%Y%m%d-%H%M%S)"
 log_file="$scripts_dir/logs/$label-$stamp.log"
-nohup python3 -u "$script" >"$log_file" 2>&1 </dev/null &
+# The board user's interactive shell config provides ROS/Python paths. Plain
+# non-interactive SSH does not load it, which makes imports such as rospy fail.
+printf -v launch_command 'exec python3 -u %q' "$script"
+nohup bash -ic "$launch_command" >"$log_file" 2>&1 </dev/null &
 pid="$!"
 echo "$pid" >"$pid_file"
 sleep 1

@@ -61,9 +61,14 @@ assert_remote_idle() {
     local host="$1"
     local pattern="$2"
     local label="$3"
+    local remote_command
 
-    ssh "${SSH_OPTIONS[@]}" "$host" bash -s -- \
-        "$pattern" "$label" <<'REMOTE'
+    # OpenSSH joins command arguments into one remote shell string. Quote the
+    # regex explicitly so characters such as '(' and '|' are not parsed by
+    # that shell before bash receives them as positional arguments.
+    printf -v remote_command 'bash -s -- %q %q' "$pattern" "$label"
+
+    ssh "${SSH_OPTIONS[@]}" "$host" "$remote_command" <<'REMOTE'
 set -eu
 pattern="$1"
 label="$2"

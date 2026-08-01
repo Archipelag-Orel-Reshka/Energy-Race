@@ -17,7 +17,7 @@ CONFIG_PATH = ROOT / "config.json"
 
 DEFAULT_DETECTION_THRESHOLD_SCALE = 0.6
 DETECTION_WINDOW_FRAMES = 5
-DETECTION_REQUIRED_HITS = 3
+DEFAULT_DETECTION_REQUIRED_HITS = 3
 
 HSV_RANGES = {
     "red": [
@@ -130,9 +130,16 @@ def color_score(frame, config):
             ),
         )
 
-    mask = cv2.morphologyEx(
-        mask, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8)
-    )
+    morphology_kernel = int(config.get("morphology_open_kernel", 3))
+    if morphology_kernel > 1:
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_OPEN,
+            np.ones(
+                (morphology_kernel, morphology_kernel),
+                dtype=np.uint8,
+            ),
+        )
     return float(cv2.countNonZero(mask)) / float(mask.size)
 
 
@@ -187,7 +194,8 @@ class StatusLed:
                 "free": ("fill", 0, 80, 0),
                 "pending": ("blink", 255, 180, 0),
                 "reserved": ("fill", 0, 0, 255),
-                "occupied": ("fill", 255, 0, 0),
+                "charging": ("blink", 255, 0, 0),
+                "charged": ("fill", 0, 255, 0),
             }
             effect, red, green, blue = effects[color]
             try:
@@ -201,7 +209,8 @@ class StatusLed:
             "free": (0, 1, 0),
             "pending": (1, 1, 0),
             "reserved": (0, 0, 1),
-            "occupied": (1, 0, 0),
+            "charging": (1, 0, 0),
+            "charged": (0, 1, 0),
         }
         self.led.color = colors[color]
 
@@ -233,10 +242,18 @@ class Station:
         self.threshold = (
             self.calibrated_threshold * self.threshold_scale
         )
+        self.detection_window_frames = int(config.get(
+            "detection_window_frames", DETECTION_WINDOW_FRAMES
+        ))
+        self.detection_required_hits = int(config.get(
+            "detection_required_hits", DEFAULT_DETECTION_REQUIRED_HITS
+        ))
         self.pending = None
         self.state = "free"
         self.reservation_deadline = 0.0
-        self.detection_hits = deque(maxlen=DETECTION_WINDOW_FRAMES)
+        self.charging_green_deadline = 0.0
+        self.charging_green_active = False
+        self.detection_hits = deque(maxlen=self.detection_window_frames)
         self.last_score_log = 0.0
         self.led = StatusLed(config)
         self.camera = open_camera(config)
@@ -379,10 +396,27 @@ class Station:
     def handle_landed(self, message):
         if not self.matches_reservation(message):
             return
+        if self.state == "occupied":
+            return
+
+        total = float(self.config.get("charge_seconds", 15.0))
+        green = float(self.config.get("charge_green_seconds", 5.0))
+        red_seconds = max(0.0, total - green)
         self.state = "occupied"
         self.reservation_deadline = 0.0
-        self.led.set("occupied")
+        self.charging_green_deadline = time.monotonic() + red_seconds
+        self.charging_green_active = red_seconds <= 0.0
+        self.led.set(
+            "charged" if self.charging_green_active else "charging"
+        )
         self.log("uav_landed", uav=message.get("uav"))
+        self.log(
+            "station_charging_started",
+            uav=message.get("uav"),
+            seconds=total,
+            red_blink_seconds=red_seconds,
+            green_seconds=green,
+        )
 
     def handle_released(self, message):
         if not self.matches_reservation(message):
@@ -403,6 +437,8 @@ class Station:
         self.state = "free"
         self.detection_hits.clear()
         self.reservation_deadline = 0.0
+        self.charging_green_deadline = 0.0
+        self.charging_green_active = False
         self.led.set("free")
 
     def detect(self, frame):
@@ -414,7 +450,7 @@ class Station:
             self.log("color_score", score=round(score, 6))
 
         self.detection_hits.append(score >= self.threshold)
-        if sum(self.detection_hits) < DETECTION_REQUIRED_HITS:
+        if sum(self.detection_hits) < self.detection_required_hits:
             return
 
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -442,6 +478,43 @@ class Station:
         self.detection_hits.clear()
         self.led.set("reserved")
 
+    def reserve_fallback_landing(self, now):
+        request = self.pending
+        self.log("request_timeout", uav=request["uav"])
+        self.send(
+            "LAND_DENIED",
+            request,
+            reason="detection_timeout",
+        )
+        self.state = "reserved"
+        self.reservation_deadline = (
+            now + float(self.config["reservation_timeout"])
+        )
+        self.detection_hits.clear()
+        self.led.set("reserved")
+        self.log(
+            "fallback_landing_reserved",
+            uav=request["uav"],
+        )
+
+    def update_charging_indicator(self, now):
+        if (
+            self.state != "occupied"
+            or self.charging_green_active
+            or now < self.charging_green_deadline
+        ):
+            return
+
+        self.charging_green_active = True
+        self.led.set("charged")
+        self.log(
+            "station_charging_green",
+            uav=self.pending["uav"],
+            green_seconds=float(
+                self.config.get("charge_green_seconds", 5.0)
+            ),
+        )
+
     def run(self):
         self.log(
             "station_started",
@@ -450,9 +523,13 @@ class Station:
             threshold=self.threshold,
             calibrated_threshold=self.calibrated_threshold,
             threshold_scale=self.threshold_scale,
+            morphology_open_kernel=int(
+                self.config.get("morphology_open_kernel", 3)
+            ),
             status_led_ok=self.led.available,
             detection_rule="{} of {} frames".format(
-                DETECTION_REQUIRED_HITS, DETECTION_WINDOW_FRAMES
+                self.detection_required_hits,
+                self.detection_window_frames,
             ),
         )
         while True:
@@ -463,14 +540,15 @@ class Station:
                 self.state == "pending"
                 and now >= self.pending["deadline"]
             ):
-                self.log("request_timeout", uav=self.pending["uav"])
-                self.reset()
+                self.reserve_fallback_landing(now)
             elif (
                 self.state == "reserved"
                 and now >= self.reservation_deadline
             ):
                 self.log("reservation_timeout", uav=self.pending["uav"])
                 self.reset()
+            else:
+                self.update_charging_indicator(now)
 
             ok, frame = self.camera.read()
             if not ok:
@@ -492,8 +570,33 @@ def validate(config, calibration):
         "threshold_scale",
         DEFAULT_DETECTION_THRESHOLD_SCALE,
     ))
-    if not 0.1 <= threshold_scale <= 1.0:
-        raise RuntimeError("threshold_scale должен быть в диапазоне 0.1..1.0")
+    if not 0.01 <= threshold_scale <= 1.0:
+        raise RuntimeError("threshold_scale должен быть в диапазоне 0.01..1.0")
+    morphology_kernel = int(config.get("morphology_open_kernel", 3))
+    if morphology_kernel < 1 or morphology_kernel % 2 == 0:
+        raise RuntimeError(
+            "morphology_open_kernel должен быть нечётным и >= 1"
+        )
+    window_frames = int(config.get(
+        "detection_window_frames", DETECTION_WINDOW_FRAMES
+    ))
+    required_hits = int(config.get(
+        "detection_required_hits", DEFAULT_DETECTION_REQUIRED_HITS
+    ))
+    if window_frames < 1:
+        raise RuntimeError("detection_window_frames должен быть >= 1")
+    if not 1 <= required_hits <= window_frames:
+        raise RuntimeError(
+            "detection_required_hits должен быть в диапазоне 1..window"
+        )
+    charge_seconds = float(config.get("charge_seconds", 15.0))
+    green_seconds = float(config.get("charge_green_seconds", 5.0))
+    if charge_seconds <= 0.0:
+        raise RuntimeError("charge_seconds должен быть > 0")
+    if not 0.0 <= green_seconds <= charge_seconds:
+        raise RuntimeError(
+            "charge_green_seconds должен быть в диапазоне 0..charge_seconds"
+        )
     if calibration["target_color"] != config["target_color"]:
         raise RuntimeError(
             "target_color изменён после калибровки; запусти calibrate.py снова"

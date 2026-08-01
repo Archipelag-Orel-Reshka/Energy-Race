@@ -13,6 +13,8 @@ from pathlib import Path
 
 import rospy
 from aruco_pose.msg import MarkerArray
+from mavros_msgs.msg import ExtendedState
+from mavros_msgs.srv import CommandBool
 from std_srvs.srv import Trigger
 from technic.srv import GetTelemetry, Navigate, SetLEDEffect
 
@@ -131,9 +133,21 @@ class UdpBus:
             if message.get("event") == "STATION_BUSY":
                 raise RuntimeError("зарядная станция занята")
             if message.get("event") == "LAND_DENIED":
-                raise StationDetectionDenied(
-                    "станция не распознала LED до таймаута"
+                denial_matches = self._matches(
+                    message, "LAND_DENIED", request_id
                 )
+                if event == "LAND_GRANTED" and denial_matches:
+                    raise StationDetectionDenied(
+                        "станция не распознала LED до таймаута"
+                    )
+                self.log.write(
+                    "udp_ignored",
+                    message="LAND_DENIED",
+                    source=address[0],
+                    waiting_for=event,
+                    reason="stale_station_reply",
+                )
+                continue
             if self._matches(message, event, request_id):
                 return message
             self.pending.append(message)
@@ -356,10 +370,22 @@ class Mission:
             "cruise_altitude",
             self.navigation["cruise_altitude"],
         ))
+        self.station_detection_altitude = float(self.navigation.get(
+            "station_detection_altitude",
+            self.cruise_altitude,
+        ))
+        if not 0.5 <= self.station_detection_altitude <= self.cruise_altitude:
+            raise RuntimeError(
+                "station_detection_altitude должен быть в диапазоне "
+                "0.5..cruise_altitude"
+            )
         self.station_mode = str(self.role_config.get(
             "station_mode",
             "real" if self.role_config.get("station_ip") else "virtual",
         ))
+        self.led_count = int(config.get("led", {}).get("count", 72))
+        if self.led_count <= 0 or self.led_count % 2:
+            raise RuntimeError("число LED должно быть положительным и чётным")
         self.network = dict(config["network"])
         self.network["team"] = config["team"]
         self.log = MissionLog(self.role)
@@ -370,6 +396,8 @@ class Mission:
         self.current_marker = int(self.role_config["home_marker"])
         self.flight_active = False
         self.station_request_id = None
+        self.extended_landed_state = None
+        self.extended_state_updated = None
 
         rospy.init_node(
             "energy_race_{}".format(self.role),
@@ -378,8 +406,17 @@ class Mission:
         rospy.Subscriber(
             "aruco_detect/markers", MarkerArray, self._markers_callback
         )
+        rospy.Subscriber(
+            "/mavros/extended_state",
+            ExtendedState,
+            self._extended_state_callback,
+        )
         for service in (
-            "get_telemetry", "navigate", "land", "led/set_effect"
+            "get_telemetry",
+            "navigate",
+            "land",
+            "led/set_effect",
+            "/mavros/cmd/arming",
         ):
             rospy.loginfo("waiting for %s", service)
             rospy.wait_for_service(service, timeout=10)
@@ -391,6 +428,9 @@ class Mission:
         self.set_effect = rospy.ServiceProxy(
             "led/set_effect", SetLEDEffect
         )
+        self.arming_service = rospy.ServiceProxy(
+            "/mavros/cmd/arming", CommandBool
+        )
 
     def preflight(self):
         telemetry = self.get_telemetry()
@@ -398,6 +438,12 @@ class Mission:
             raise RuntimeError("PX4 is not connected")
         if telemetry.armed:
             raise RuntimeError("дрон уже armed до старта миссии")
+        extended_state = rospy.wait_for_message(
+            "/mavros/extended_state",
+            ExtendedState,
+            timeout=5,
+        )
+        self._extended_state_callback(extended_state)
         station_ip = self.role_config.get("station_ip")
         if self.station_mode not in ("real", "virtual"):
             raise RuntimeError(
@@ -621,22 +667,38 @@ class Mission:
         )
 
     def half_red_blue(self):
-        from led_msgs.msg import LEDState, LEDStateArray
+        from led_msgs.msg import LEDState
         from led_msgs.srv import SetLEDs
 
         rospy.wait_for_service("led/set_leds", timeout=5)
-        state = rospy.wait_for_message(
-            "led/state", LEDStateArray, timeout=5
-        )
-        middle = len(state.leds) // 2
-        colors = []
-        for position, current in enumerate(state.leds):
-            if position < middle:
-                colors.append(LEDState(current.index, 255, 0, 0))
-            else:
-                colors.append(LEDState(current.index, 0, 0, 255))
+        middle = self.led_count // 2
+        colors = [
+            LEDState(index, 255, 0, 0)
+            if index < middle
+            else LEDState(index, 0, 0, 255)
+            for index in range(self.led_count)
+        ]
         rospy.ServiceProxy("led/set_leds", SetLEDs)(colors)
-        self.log.write("led_half_red_blue", count=len(colors))
+        self.log.write(
+            "led_half_red_blue",
+            count=len(colors),
+            red_count=middle,
+            blue_count=len(colors) - middle,
+        )
+
+    def _extended_state_callback(self, message):
+        self.extended_landed_state = int(message.landed_state)
+        self.extended_state_updated = time.monotonic()
+
+    def _ground_state_is_fresh(self, now):
+        if self.extended_state_updated is None:
+            return False
+        max_age = float(self.navigation["landing_state_max_age"])
+        return (
+            now - self.extended_state_updated <= max_age
+            and self.extended_landed_state
+            == ExtendedState.LANDED_STATE_ON_GROUND
+        )
 
     def takeoff(self, height):
         self.flight_active = True
@@ -712,7 +774,7 @@ class Mission:
         self.navigate_wait(
             x=target_x,
             y=target_y,
-            z=self.cruise_altitude,
+            z=self.station_detection_altitude,
             frame_id="aruco_map",
             arrival_tolerance=float(
                 self.navigation["station_arrival_tolerance"]
@@ -725,7 +787,7 @@ class Mission:
         self.log.write(
             "station_centered",
             station=station_id,
-            altitude=self.cruise_altitude,
+            altitude=self.station_detection_altitude,
             hold_seconds=hold_seconds,
         )
 
@@ -744,7 +806,7 @@ class Mission:
         self.navigate_wait(
             x=target_x,
             y=target_y,
-            z=self.cruise_altitude,
+            z=self.station_detection_altitude,
             frame_id="aruco_map",
             arrival_tolerance=float(
                 self.navigation["station_arrival_tolerance"]
@@ -756,7 +818,7 @@ class Mission:
         self.log.write(
             "post_grant_stabilized",
             station=station_id,
-            altitude=self.cruise_altitude,
+            altitude=self.station_detection_altitude,
             hold_seconds=hold_seconds,
             permission_granted=bool(permission_granted),
         )
@@ -950,8 +1012,17 @@ class Mission:
         started = time.monotonic()
         deadline = started + float(self.navigation["landing_timeout"])
         retry_seconds = float(self.navigation["landing_retry_seconds"])
+        ground_confirm_seconds = float(
+            self.navigation["landing_ground_confirm_seconds"]
+        )
+        disarm_retry_seconds = float(
+            self.navigation["landing_disarm_retry_seconds"]
+        )
         next_retry = started
+        next_disarm = started
+        ground_since = None
         attempt = 0
+        disarm_attempt = 0
         while time.monotonic() < deadline and not rospy.is_shutdown():
             now = time.monotonic()
             if now >= next_retry:
@@ -966,8 +1037,43 @@ class Mission:
 
             if not self.get_telemetry().armed:
                 self.flight_active = False
-                self.log.write("landed_disarmed", attempts=attempt)
+                self.log.write(
+                    "landed_disarmed",
+                    attempts=attempt,
+                    disarm_attempts=disarm_attempt,
+                )
                 return
+
+            if self._ground_state_is_fresh(now):
+                if ground_since is None:
+                    ground_since = now
+                    self.log.write("landing_ground_detected")
+                if (
+                    now - ground_since >= ground_confirm_seconds
+                    and now >= next_disarm
+                ):
+                    disarm_attempt += 1
+                    next_disarm = now + disarm_retry_seconds
+                    try:
+                        response = self.arming_service(False)
+                        success = bool(
+                            getattr(response, "success", False)
+                        )
+                        self.log.write(
+                            "landing_disarm_command",
+                            attempt=disarm_attempt,
+                            success=success,
+                            ground_seconds=round(now - ground_since, 1),
+                        )
+                    except Exception as error:
+                        self.log.write(
+                            "landing_disarm_failed",
+                            attempt=disarm_attempt,
+                            error=str(error),
+                            mission_continues=True,
+                        )
+            else:
+                ground_since = None
             rospy.sleep(0.2)
         if rospy.is_shutdown():
             raise RuntimeError("ROS shutdown during landing")

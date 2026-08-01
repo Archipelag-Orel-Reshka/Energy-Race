@@ -32,6 +32,18 @@ def install_ros_stubs():
     aruco_pose_msg.MarkerArray = type("MarkerArray", (), {})
     aruco_pose.msg = aruco_pose_msg
 
+    mavros_msgs = types.ModuleType("mavros_msgs")
+    mavros_msgs_msg = types.ModuleType("mavros_msgs.msg")
+    mavros_msgs_msg.ExtendedState = type(
+        "ExtendedState",
+        (),
+        {"LANDED_STATE_ON_GROUND": 1},
+    )
+    mavros_msgs_srv = types.ModuleType("mavros_msgs.srv")
+    mavros_msgs_srv.CommandBool = type("CommandBool", (), {})
+    mavros_msgs.msg = mavros_msgs_msg
+    mavros_msgs.srv = mavros_msgs_srv
+
     std_srvs = types.ModuleType("std_srvs")
     std_srvs_srv = types.ModuleType("std_srvs.srv")
     std_srvs_srv.Trigger = type("Trigger", (), {})
@@ -48,6 +60,9 @@ def install_ros_stubs():
         "rospy": rospy,
         "aruco_pose": aruco_pose,
         "aruco_pose.msg": aruco_pose_msg,
+        "mavros_msgs": mavros_msgs,
+        "mavros_msgs.msg": mavros_msgs_msg,
+        "mavros_msgs.srv": mavros_msgs_srv,
         "std_srvs": std_srvs,
         "std_srvs.srv": std_srvs_srv,
         "technic": technic,
@@ -59,6 +74,9 @@ def install_ros_stubs():
 ROS = install_ros_stubs()
 MISSION = load_module("energy_race_main_mission", SCRIPTS / "mission.py")
 CONTROL = load_module("energy_race_main_control", SCRIPTS / "control.py")
+sys.modules.setdefault("cv2", types.ModuleType("cv2"))
+sys.modules.setdefault("numpy", types.ModuleType("numpy"))
+STATION = load_module("energy_race_station", ROOT / "station" / "station.py")
 CONFIG = json.loads(
     (SCRIPTS / "mission_config.json").read_text(encoding="utf-8")
 )
@@ -93,9 +111,15 @@ class MissionTests(unittest.TestCase):
         mission.cruise_altitude = float(
             mission.role_config["cruise_altitude"]
         )
+        mission.station_detection_altitude = float(
+            mission.navigation["station_detection_altitude"]
+        )
         mission.station_mode = mission.role_config["station_mode"]
+        mission.led_count = int(CONFIG["led"]["count"])
         mission.current_marker = int(mission.role_config["home_marker"])
         mission.flight_active = True
+        mission.extended_landed_state = None
+        mission.extended_state_updated = None
         mission.log = FakeLog()
         mission.bus = FakeBus()
         return mission
@@ -113,9 +137,32 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(uav2["station_ip"], "192.168.0.239")
         self.assertEqual(uav2["cruise_altitude"], 2.0)
         self.assertEqual(CONFIG["network"]["uav2_ip"], "192.168.0.184")
+        self.assertEqual(
+            CONFIG["navigation"]["station_detection_altitude"],
+            1.8,
+        )
         self.assertEqual(CONFIG["timing"]["uav1_route_delay"], 5.0)
+        self.assertEqual(
+            CONFIG["timing"]["station_post_grant_hold_seconds"],
+            3.0,
+        )
+        self.assertEqual(CONFIG["timing"]["station_hold_seconds"], 3.0)
+        self.assertEqual(
+            CONFIG["navigation"]["station_departure_height"],
+            2.0,
+        )
+        self.assertEqual(CONFIG["navigation"]["station_speed"], 0.25)
+        self.assertEqual(
+            CONFIG["navigation"]["station_arrival_tolerance"],
+            0.1,
+        )
         self.assertEqual(CONFIG["navigation"]["route_mode"], "direct")
         self.assertEqual(CONFIG["navigation"]["speed"], 0.45)
+        self.assertEqual(CONFIG["led"]["count"], 72)
+        self.assertEqual(
+            CONFIG["navigation"]["landing_ground_confirm_seconds"],
+            1.0,
+        )
 
     def test_preflight_rejects_non_free_station(self):
         mission = self.make_mission("uav1")
@@ -156,6 +203,93 @@ class MissionTests(unittest.TestCase):
         mission.bus = StationBus()
         with self.assertRaisesRegex(RuntimeError, "LED-ленты"):
             mission.preflight_station("192.168.0.224")
+
+    def test_station_detection_denial_is_distinguishable(self):
+        bus = object.__new__(MISSION.UdpBus)
+        bus.config = {"team": CONFIG["team"]}
+        bus.role = "uav2"
+        bus.log = FakeLog()
+        bus.pending = []
+
+        class FakeSocket:
+            def settimeout(self, _timeout):
+                pass
+
+            def recvfrom(self, _size):
+                payload = json.dumps({
+                    "team": CONFIG["team"],
+                    "event": "LAND_DENIED",
+                    "request_id": "request-1",
+                    "reason": "detection_timeout",
+                }).encode("utf-8")
+                return payload, ("192.168.0.239", 45901)
+
+        bus.socket = FakeSocket()
+        with self.assertRaisesRegex(
+            MISSION.StationDetectionDenied,
+            "станция не распознала LED",
+        ):
+            bus.wait("LAND_GRANTED", 1.0, request_id="request-1")
+
+    def test_stale_station_denial_does_not_abort_return_home_wait(self):
+        bus = object.__new__(MISSION.UdpBus)
+        bus.config = {"team": CONFIG["team"]}
+        bus.role = "uav1"
+        bus.log = FakeLog()
+        bus.pending = []
+        payloads = iter((
+            {
+                "team": CONFIG["team"],
+                "event": "LAND_DENIED",
+                "request_id": "old-request",
+            },
+            {
+                "team": CONFIG["team"],
+                "event": "RETURN_HOME",
+                "target": "uav1",
+            },
+        ))
+
+        class FakeSocket:
+            def settimeout(self, _timeout):
+                pass
+
+            def recvfrom(self, _size):
+                return (
+                    json.dumps(next(payloads)).encode("utf-8"),
+                    ("192.168.0.224", 45901),
+                )
+
+        bus.socket = FakeSocket()
+        result = bus.wait("RETURN_HOME", 1.0)
+
+        self.assertEqual(result["event"], "RETURN_HOME")
+        ignored = [
+            data for event, data in bus.log.events
+            if event == "udp_ignored"
+        ]
+        self.assertEqual(len(ignored), 1)
+        self.assertEqual(ignored[0]["message"], "LAND_DENIED")
+        self.assertEqual(ignored[0]["waiting_for"], "RETURN_HOME")
+
+    def test_station_detection_denial_continues_with_aruco_landing(self):
+        mission = self.make_mission("uav1")
+
+        def deny():
+            raise MISSION.StationDetectionDenied(
+                "станция не распознала LED до таймаута"
+            )
+
+        mission.request_landing = deny
+
+        self.assertFalse(mission.await_station_permission())
+        fallbacks = [
+            data for event, data in mission.log.events
+            if event == "station_detection_fallback"
+        ]
+        self.assertEqual(len(fallbacks), 1)
+        self.assertEqual(fallbacks[0]["fallback"], "aruco_center_land")
+        self.assertTrue(fallbacks[0]["mission_continues"])
 
     def test_uav1_uses_one_direct_leg_to_station(self):
         mission = self.make_mission("uav1")
@@ -285,8 +419,8 @@ class MissionTests(unittest.TestCase):
 
     def test_station_centering_uses_precise_tolerance(self):
         for role, expected in (
-            ("uav1", (5.0, 6.0, 2.0)),
-            ("uav2", (2.0, 1.0, 2.0)),
+            ("uav1", (5.0, 6.0, 1.8)),
+            ("uav2", (2.0, 1.0, 1.8)),
         ):
             mission = self.make_mission(role)
             mission.timing["station_hold_seconds"] = 0.0
@@ -299,7 +433,245 @@ class MissionTests(unittest.TestCase):
                 (calls[0]["x"], calls[0]["y"], calls[0]["z"]),
                 expected,
             )
-            self.assertEqual(calls[0]["arrival_tolerance"], 0.15)
+            self.assertEqual(calls[0]["arrival_tolerance"], 0.1)
+            self.assertEqual(calls[0]["speed"], 0.25)
+
+    def test_both_uavs_recenter_and_hold_after_land_grant(self):
+        for role, station, expected in (
+            ("uav1", 5, (5.0, 6.0, 1.8)),
+            ("uav2", 37, (2.0, 1.0, 1.8)),
+        ):
+            mission = self.make_mission(role)
+            mission.timing["station_post_grant_hold_seconds"] = 0.0
+            calls = []
+            mission.navigate_wait = lambda **kwargs: calls.append(kwargs)
+
+            mission.stabilize_after_land_grant()
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(
+                (calls[0]["x"], calls[0]["y"], calls[0]["z"]),
+                expected,
+            )
+            self.assertEqual(calls[0]["frame_id"], "aruco_map")
+            self.assertEqual(calls[0]["arrival_tolerance"], 0.1)
+            self.assertEqual(calls[0]["speed"], 0.25)
+            self.assertIn(
+                (
+                    "post_grant_stabilized",
+                    {
+                        "station": station,
+                        "altitude": 1.8,
+                        "hold_seconds": 0.0,
+                        "permission_granted": True,
+                    },
+                ),
+                mission.log.events,
+            )
+
+    def test_station_hold_keeps_setpoint_without_unreliable_telemetry(self):
+        mission = self.make_mission("uav1")
+        clock = [0.0]
+        original_monotonic = MISSION.time.monotonic
+        original_sleep = ROS.sleep
+        mission.get_telemetry = lambda **_kwargs: self.fail(
+            "hold must not query navigate_target telemetry"
+        )
+        MISSION.time.monotonic = lambda: clock[0]
+        ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        try:
+            mission.hold_station_target(0.3)
+        finally:
+            MISSION.time.monotonic = original_monotonic
+            ROS.sleep = original_sleep
+
+        self.assertGreaterEqual(clock[0], 0.3)
+        self.assertTrue(any(
+            event == "station_hold_complete"
+            for event, _data in mission.log.events
+        ))
+
+    def test_uav1_stabilizes_between_permission_and_land(self):
+        mission = self.make_mission("uav1")
+        events = []
+
+        class StopAtLand(Exception):
+            pass
+
+        mission.enter = lambda state: events.append(state)
+        mission.led = lambda *args: None
+        mission.wait_start = lambda: None
+        mission.takeoff = lambda _altitude: None
+        mission.wait_any_marker = lambda: None
+        mission.hold_before_station_route = lambda: None
+        mission.goto_marker = lambda _marker: None
+        mission.center_on_station = lambda: events.append("CENTER_INITIAL")
+        def grant_permission():
+            events.append("LAND_GRANTED")
+            return True
+
+        mission.await_station_permission = grant_permission
+        mission.stabilize_after_land_grant = (
+            lambda permission: events.append(
+                ("STABILIZED", permission)
+            )
+        )
+
+        def stop_at_land():
+            events.append("LAND_CALLED")
+            raise StopAtLand()
+
+        mission.land = stop_at_land
+        with self.assertRaises(StopAtLand):
+            mission.run_uav1()
+
+        self.assertLess(
+            events.index("LAND_GRANTED"),
+            events.index(("STABILIZED", True)),
+        )
+        self.assertLess(
+            events.index(("STABILIZED", True)),
+            events.index("LAND_CALLED"),
+        )
+
+    def test_uav2_stabilizes_between_permission_and_station_land(self):
+        mission = self.make_mission("uav2")
+        events = []
+        land_calls = [0]
+
+        class StopAtStationLand(Exception):
+            pass
+
+        mission.enter = lambda state: events.append(state)
+        mission.led = lambda *args: None
+        mission.wait_start = lambda: None
+        mission.takeoff = lambda _altitude: None
+        mission.wait_any_marker = lambda: None
+        mission.goto_marker = lambda _marker: None
+        mission.center_on_station = lambda: events.append("CENTER_INITIAL")
+        def grant_permission():
+            events.append("LAND_GRANTED")
+            return True
+
+        mission.await_station_permission = grant_permission
+        mission.stabilize_after_land_grant = (
+            lambda permission: events.append(
+                ("STABILIZED", permission)
+            )
+        )
+        mission.try_servo_action = lambda _action: True
+        mission.bus.wait = lambda *_args, **_kwargs: None
+
+        def land():
+            land_calls[0] += 1
+            if land_calls[0] == 2:
+                events.append("STATION_LAND_CALLED")
+                raise StopAtStationLand()
+
+        mission.land = land
+        with self.assertRaises(StopAtStationLand):
+            mission.run_uav2()
+
+        self.assertLess(
+            events.index("LAND_GRANTED"),
+            events.index(("STABILIZED", True)),
+        )
+        self.assertLess(
+            events.index(("STABILIZED", True)),
+            events.index("STATION_LAND_CALLED"),
+        )
+
+    def test_ssh_disconnect_and_sigterm_install_safe_handlers(self):
+        registrations = []
+        original_signal = MISSION.signal.signal
+        MISSION.signal.signal = (
+            lambda signum, handler: registrations.append((signum, handler))
+        )
+        try:
+            MISSION.install_termination_handlers()
+        finally:
+            MISSION.signal.signal = original_signal
+
+        self.assertEqual(
+            [signum for signum, _handler in registrations],
+            [MISSION.signal.SIGHUP, MISSION.signal.SIGTERM],
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            MISSION.handle_termination_signal(MISSION.signal.SIGHUP, None)
+
+    def test_interrupted_main_requests_safe_land_before_close(self):
+        events = []
+
+        class FakeMission:
+            log = FakeLog()
+
+            class Bus:
+                @staticmethod
+                def status(_state):
+                    events.append("STATUS")
+
+            bus = Bus()
+
+            def __init__(self, _config, _role):
+                pass
+
+            def run(self):
+                raise KeyboardInterrupt
+
+            def safe_land(self):
+                events.append("SAFE_LAND")
+
+            def close(self):
+                events.append("CLOSE")
+
+        originals = (
+            MISSION.Mission,
+            MISSION.load_config,
+            MISSION.install_termination_handlers,
+        )
+        MISSION.Mission = FakeMission
+        MISSION.load_config = lambda: CONFIG
+        MISSION.install_termination_handlers = lambda: None
+        try:
+            self.assertEqual(MISSION.main("uav2"), 130)
+        finally:
+            (
+                MISSION.Mission,
+                MISSION.load_config,
+                MISSION.install_termination_handlers,
+            ) = originals
+
+        self.assertLess(events.index("SAFE_LAND"), events.index("CLOSE"))
+
+    def test_role_ip_mismatch_warns_and_continues(self):
+        mission = self.make_mission("uav2")
+        mission.network = dict(CONFIG["network"])
+
+        class FakeProbe:
+            def connect(self, _destination):
+                pass
+
+            def getsockname(self):
+                return ("192.168.0.29", 12345)
+
+            def close(self):
+                pass
+
+        original_socket = MISSION.socket.socket
+        MISSION.socket.socket = lambda *args, **kwargs: FakeProbe()
+        try:
+            self.assertFalse(mission.verify_role_ip("192.168.0.239"))
+        finally:
+            MISSION.socket.socket = original_socket
+
+        warnings = [
+            data for event, data in mission.log.events
+            if event == "role_ip_warning"
+        ]
+        self.assertEqual(len(warnings), 1)
+        self.assertTrue(warnings[0]["mission_continues"])
+        self.assertEqual(warnings[0]["actual_ip"], "192.168.0.29")
+        self.assertEqual(warnings[0]["expected_ip"], "192.168.0.184")
 
     def test_land_retries_after_ten_seconds(self):
         mission = self.make_mission("uav1")
@@ -325,6 +697,160 @@ class MissionTests(unittest.TestCase):
 
         self.assertEqual(commands, [0.0, 10.2])
         self.assertFalse(mission.flight_active)
+
+    def test_land_disarms_only_after_confirmed_on_ground(self):
+        mission = self.make_mission("uav1")
+        clock = [0.0]
+        armed = [True]
+        land_commands = []
+        disarm_commands = []
+        original_monotonic = MISSION.time.monotonic
+        original_sleep = ROS.sleep
+
+        class Telemetry:
+            @property
+            def armed(self):
+                return armed[0]
+
+        class Response:
+            success = True
+
+        mission.land_service = lambda: land_commands.append(clock[0])
+        mission.get_telemetry = lambda: Telemetry()
+
+        def arming(value):
+            disarm_commands.append((clock[0], value))
+            armed[0] = False
+            return Response()
+
+        mission.arming_service = arming
+        mission.extended_landed_state = (
+            MISSION.ExtendedState.LANDED_STATE_ON_GROUND
+        )
+        mission.extended_state_updated = 0.0
+        MISSION.time.monotonic = lambda: clock[0]
+        ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        try:
+            mission.land()
+        finally:
+            MISSION.time.monotonic = original_monotonic
+            ROS.sleep = original_sleep
+
+        self.assertEqual(land_commands, [0.0])
+        self.assertEqual(len(disarm_commands), 1)
+        self.assertFalse(disarm_commands[0][1])
+        self.assertGreaterEqual(disarm_commands[0][0], 1.0)
+        self.assertFalse(mission.flight_active)
+
+    def test_land_never_forces_disarm_without_ground_state(self):
+        mission = self.make_mission("uav1")
+        clock = [0.0]
+        disarm_commands = []
+        original_monotonic = MISSION.time.monotonic
+        original_sleep = ROS.sleep
+
+        class Telemetry:
+            @property
+            def armed(self):
+                return clock[0] < 1.2
+
+        mission.land_service = lambda: None
+        mission.get_telemetry = lambda: Telemetry()
+        mission.arming_service = lambda value: disarm_commands.append(value)
+        mission.extended_landed_state = 4
+        mission.extended_state_updated = 0.0
+        MISSION.time.monotonic = lambda: clock[0]
+        ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        try:
+            mission.land()
+        finally:
+            MISSION.time.monotonic = original_monotonic
+            ROS.sleep = original_sleep
+
+        self.assertEqual(disarm_commands, [])
+
+    def test_half_red_blue_uses_exactly_36_plus_36_leds(self):
+        mission = self.make_mission("uav2")
+        sent = []
+        original_service_proxy = ROS.ServiceProxy
+
+        class LEDState:
+            def __init__(self, index, red, green, blue):
+                self.index = index
+                self.r = red
+                self.g = green
+                self.b = blue
+
+        led_msgs = types.ModuleType("led_msgs")
+        led_msgs_msg = types.ModuleType("led_msgs.msg")
+        led_msgs_srv = types.ModuleType("led_msgs.srv")
+        led_msgs_msg.LEDState = LEDState
+        led_msgs_srv.SetLEDs = type("SetLEDs", (), {})
+        led_msgs.msg = led_msgs_msg
+        led_msgs.srv = led_msgs_srv
+        previous_modules = {
+            name: sys.modules.get(name)
+            for name in ("led_msgs", "led_msgs.msg", "led_msgs.srv")
+        }
+        sys.modules.update({
+            "led_msgs": led_msgs,
+            "led_msgs.msg": led_msgs_msg,
+            "led_msgs.srv": led_msgs_srv,
+        })
+        ROS.ServiceProxy = lambda *_args, **_kwargs: (
+            lambda colors: sent.extend(colors)
+        )
+        try:
+            mission.half_red_blue()
+        finally:
+            ROS.ServiceProxy = original_service_proxy
+            for name, module in previous_modules.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
+        self.assertEqual(len(sent), 72)
+        self.assertEqual([item.index for item in sent], list(range(72)))
+        self.assertTrue(
+            all((item.r, item.g, item.b) == (255, 0, 0) for item in sent[:36])
+        )
+        self.assertTrue(
+            all((item.r, item.g, item.b) == (0, 0, 255) for item in sent[36:])
+        )
+
+    def test_charge_blinks_red_then_holds_green(self):
+        mission = self.make_mission("uav1")
+        clock = [0.0]
+        indications = []
+        states = []
+        original_monotonic = MISSION.time.monotonic
+        original_sleep = ROS.sleep
+        mission.enter = lambda state: states.append((state, clock[0]))
+        mission.led = lambda effect, red, green, blue: indications.append(
+            (effect, red, green, blue, clock[0])
+        )
+        MISSION.time.monotonic = lambda: clock[0]
+        ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        try:
+            mission.charge()
+        finally:
+            MISSION.time.monotonic = original_monotonic
+            ROS.sleep = original_sleep
+
+        self.assertEqual(
+            [indication[:4] for indication in indications],
+            [
+                ("blink", 255, 0, 0),
+                ("fill", 0, 255, 0),
+            ],
+        )
+        self.assertAlmostEqual(indications[0][4], 0.0)
+        self.assertAlmostEqual(indications[1][4], 10.1)
+        self.assertEqual(states[0], ("CHARGING_RED_BLINK", 0.0))
+        self.assertEqual(states[1][0], "CHARGING_GREEN")
+        self.assertAlmostEqual(states[1][1], 10.1)
+        self.assertGreaterEqual(clock[0], 15.0)
 
     def test_gpio_servo_matches_calibrated_values(self):
         servo = MISSION.Servo(CONFIG["servo"], FakeLog())
@@ -457,12 +983,115 @@ class LauncherTests(unittest.TestCase):
 
 
 class StationConfigTests(unittest.TestCase):
+    def test_station_led_shows_invitation_and_charge_cycle(self):
+        effects = []
+        status_led = object.__new__(STATION.StatusLed)
+        status_led.mode = "ros"
+        status_led.led = lambda **kwargs: effects.append(kwargs)
+
+        status_led.set("reserved")
+        status_led.set("charging")
+        status_led.set("charged")
+
+        self.assertEqual(
+            effects,
+            [
+                {"effect": "fill", "r": 0, "g": 0, "b": 255},
+                {"effect": "blink", "r": 255, "g": 0, "b": 0},
+                {"effect": "fill", "r": 0, "g": 255, "b": 0},
+            ],
+        )
+
+    def test_landed_starts_station_charge_and_is_idempotent(self):
+        station = object.__new__(STATION.Station)
+        station.pending = {
+            "uav": "uav1",
+            "request_id": "request-1",
+            "ip": "192.168.0.29",
+        }
+        station.config = {
+            "charge_seconds": 15.0,
+            "charge_green_seconds": 5.0,
+        }
+        station.state = "reserved"
+        station.reservation_deadline = 45.0
+        station.charging_green_deadline = 0.0
+        station.charging_green_active = False
+        indications = []
+        events = []
+
+        class Led:
+            def set(self, state):
+                indications.append(state)
+
+        station.led = Led()
+        station.log = lambda event, **data: events.append((event, data))
+        message = {"uav": "uav1", "request_id": "request-1"}
+        original_monotonic = STATION.time.monotonic
+        STATION.time.monotonic = lambda: 100.0
+        try:
+            station.handle_landed(message)
+            station.handle_landed(message)
+        finally:
+            STATION.time.monotonic = original_monotonic
+
+        self.assertEqual(station.state, "occupied")
+        self.assertEqual(station.charging_green_deadline, 110.0)
+        self.assertFalse(station.charging_green_active)
+        self.assertEqual(indications, ["charging"])
+        self.assertEqual(
+            sum(event == "station_charging_started" for event, _ in events),
+            1,
+        )
+
+        station.update_charging_indicator(109.9)
+        self.assertEqual(indications, ["charging"])
+        station.update_charging_indicator(110.0)
+        self.assertEqual(indications, ["charging", "charged"])
+        self.assertTrue(station.charging_green_active)
+
+    def test_detection_timeout_keeps_station_reserved_for_fallback(self):
+        station = object.__new__(STATION.Station)
+        station.pending = {
+            "uav": "uav1",
+            "request_id": "request-1",
+            "ip": "192.168.0.29",
+        }
+        station.config = {"reservation_timeout": 45.0}
+        station.state = "pending"
+        station.detection_hits = [True]
+        events = []
+        sent = []
+
+        class Led:
+            def set(self, state):
+                events.append(("led", state))
+
+        station.led = Led()
+        station.log = lambda event, **data: events.append((event, data))
+        station.send = lambda event, request, **extra: sent.append(
+            (event, request, extra)
+        )
+
+        station.reserve_fallback_landing(10.0)
+
+        self.assertEqual(station.state, "reserved")
+        self.assertEqual(station.reservation_deadline, 55.0)
+        self.assertEqual(station.detection_hits, [])
+        self.assertEqual(sent[0][0], "LAND_DENIED")
+        self.assertIn(("led", "reserved"), events)
+        self.assertTrue(any(
+            event == "fallback_landing_reserved"
+            for event, _data in events
+            if event != "led"
+        ))
+
     def test_calibrations_and_sensitivity(self):
         cases = (
-            (5, 0.0007552083333333333),
-            (37, 0.005338541666666667),
+            (5, 0.0030598958333333333, 0.02),
+            (37, 0.005338541666666667, 0.02),
         )
-        for station_id, calibrated_threshold in cases:
+        for station_id, calibrated_threshold, threshold_scale in cases:
             directory = ROOT / "station" / "field" / (
                 "station-{}".format(station_id)
             ) / "red"
@@ -472,13 +1101,20 @@ class StationConfigTests(unittest.TestCase):
             calibration = json.loads(
                 (directory / "calibration.json").read_text(encoding="utf-8")
             )
+            STATION.validate(config, calibration)
             self.assertEqual(config["station_id"], station_id)
-            self.assertEqual(config["threshold_scale"], 0.5)
+            self.assertEqual(config["threshold_scale"], threshold_scale)
+            self.assertEqual(config["detection_window_frames"], 5)
+            self.assertEqual(config["detection_required_hits"], 2)
+            self.assertEqual(config["morphology_open_kernel"], 1)
+            self.assertEqual(config["request_timeout"], 10.0)
+            self.assertEqual(config["charge_seconds"], 15.0)
+            self.assertEqual(config["charge_green_seconds"], 5.0)
             self.assertEqual(config["status_led"]["mode"], "ros")
             self.assertEqual(calibration["threshold"], calibrated_threshold)
             self.assertAlmostEqual(
                 calibration["threshold"] * config["threshold_scale"],
-                calibrated_threshold * 0.5,
+                calibrated_threshold * threshold_scale,
             )
 
 

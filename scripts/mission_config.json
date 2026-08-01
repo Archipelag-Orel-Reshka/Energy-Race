@@ -26,6 +26,7 @@
   },
   "navigation": {
     "cruise_altitude": 2.0,
+    "station_detection_altitude": 1.8,
     "station_departure_height": 2.0,
     "route_mode": "direct",
     "speed": 0.45,
@@ -35,7 +36,13 @@
     "navigation_timeout": 45.0,
     "marker_timeout": 10.0,
     "landing_timeout": 45.0,
-    "landing_retry_seconds": 10.0
+    "landing_retry_seconds": 10.0,
+    "landing_ground_confirm_seconds": 1.0,
+    "landing_disarm_retry_seconds": 2.0,
+    "landing_state_max_age": 2.0
+  },
+  "led": {
+    "count": 72
   },
   "timing": {
     "charge_seconds": 15.0,

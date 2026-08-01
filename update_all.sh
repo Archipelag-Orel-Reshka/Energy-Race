@@ -4,8 +4,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-UAV1_HOST="${UAV1_HOST:-orangepi@192.168.0.29}"
-UAV2_HOST="${UAV2_HOST:-orangepi@192.168.0.192}"
+UAV1_IP="${UAV1_IP:-192.168.0.29}"
+UAV2_IP="${UAV2_IP:-192.168.0.184}"
+UAV1_HOST="${UAV1_HOST:-orangepi@$UAV1_IP}"
+UAV2_HOST="${UAV2_HOST:-orangepi@$UAV2_IP}"
 STATION5_HOST="${STATION5_HOST:-pi@192.168.0.224}"
 STATION37_HOST="${STATION37_HOST:-pi@192.168.0.239}"
 
@@ -29,6 +31,7 @@ required_files=(
     "$ROOT_DIR/scripts/mission_config.json"
     "$ROOT_DIR/scripts/uav1.py"
     "$ROOT_DIR/scripts/uav2.py"
+    "$ROOT_DIR/scripts/test_half_red_blue.py"
     "$ROOT_DIR/station/station.py"
     "$ROOT_DIR/station/calibrate.py"
     "$ROOT_DIR/station/field/station-5/red/config.json"
@@ -94,6 +97,7 @@ deploy_uav() {
         "$ROOT_DIR/scripts/mission_config.json" \
         "$ROOT_DIR/scripts/uav1.py" \
         "$ROOT_DIR/scripts/uav2.py" \
+        "$ROOT_DIR/scripts/test_half_red_blue.py" \
         "$host:~/scripts/.energy-race-deploy/"
 
     ssh "${SSH_OPTIONS[@]}" "$host" bash -s <<'REMOTE'
@@ -101,7 +105,7 @@ set -eu
 stage="$HOME/scripts/.energy-race-deploy"
 backup="$HOME/scripts/backups/$(date +%Y%m%d-%H%M%S)-main"
 mkdir -p "$backup"
-for file in mission.py mission_config.json uav1.py uav2.py; do
+for file in mission.py mission_config.json uav1.py uav2.py test_half_red_blue.py; do
     if [ -f "$HOME/scripts/$file" ]; then
         cp -p "$HOME/scripts/$file" "$backup/$file"
     fi
@@ -110,6 +114,7 @@ install -m 755 "$stage/mission.py" "$HOME/scripts/mission.py"
 install -m 644 "$stage/mission_config.json" "$HOME/scripts/mission_config.json"
 install -m 755 "$stage/uav1.py" "$HOME/scripts/uav1.py"
 install -m 755 "$stage/uav2.py" "$HOME/scripts/uav2.py"
+install -m 755 "$stage/test_half_red_blue.py" "$HOME/scripts/test_half_red_blue.py"
 echo "backup: $backup"
 REMOTE
 }

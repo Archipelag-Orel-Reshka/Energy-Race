@@ -16,7 +16,13 @@ CONFIG = json.loads(
     CONFIG_PATH.read_text(encoding="utf-8")
 )
 TEAM = CONFIG["team"]
-NETWORK = CONFIG["network"]
+NETWORK = dict(CONFIG["network"])
+NETWORK["uav1_ip"] = os.environ.get(
+    "ENERGY_RACE_UAV1_IP", NETWORK["uav1_ip"]
+)
+NETWORK["uav2_ip"] = os.environ.get(
+    "ENERGY_RACE_UAV2_IP", NETWORK["uav2_ip"]
+)
 DRONES = {
     "uav1": NETWORK["uav1_ip"],
     "uav2": NETWORK["uav2_ip"],

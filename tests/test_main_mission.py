@@ -112,7 +112,7 @@ class MissionTests(unittest.TestCase):
         )
         self.assertEqual(uav2["station_ip"], "192.168.0.239")
         self.assertEqual(uav2["cruise_altitude"], 2.0)
-        self.assertEqual(CONFIG["network"]["uav2_ip"], "192.168.0.192")
+        self.assertEqual(CONFIG["network"]["uav2_ip"], "192.168.0.184")
         self.assertEqual(CONFIG["timing"]["uav1_route_delay"], 5.0)
         self.assertEqual(CONFIG["navigation"]["route_mode"], "direct")
         self.assertEqual(CONFIG["navigation"]["speed"], 0.45)

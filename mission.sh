@@ -4,8 +4,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-UAV1_HOST="${UAV1_HOST:-orangepi@192.168.0.29}"
-UAV2_HOST="${UAV2_HOST:-orangepi@192.168.0.192}"
+UAV1_IP="${UAV1_IP:-192.168.0.29}"
+UAV2_IP="${UAV2_IP:-192.168.0.184}"
+UAV1_HOST="${UAV1_HOST:-orangepi@$UAV1_IP}"
+UAV2_HOST="${UAV2_HOST:-orangepi@$UAV2_IP}"
 STATION5_HOST="${STATION5_HOST:-pi@192.168.0.224}"
 STATION37_HOST="${STATION37_HOST:-pi@192.168.0.239}"
 CONTROL_IP="192.168.0.90"
@@ -109,15 +111,24 @@ REMOTE
 }
 
 echo "Запуск станций"
+echo "Адреса БВС: uav1=$UAV1_IP, uav2=$UAV2_IP"
 start_remote "$STATION5_HOST" "station-5" "station.py" "yes"
 start_remote "$STATION37_HOST" "station-37" "station.py" "yes"
 
 echo "Ожидание камер станций"
 sleep 2
 
+if [ "${STATIONS_ONLY:-0}" = "1" ]; then
+    echo "Запущены только станции; процессы БВС и control.py не запускались."
+    exit 0
+fi
+
 echo "Запуск бортовых миссий (моторы ждут START от control.py)"
 start_remote "$UAV1_HOST" "uav1" "uav1.py" "no"
 start_remote "$UAV2_HOST" "uav2" "uav2.py" "no"
 
 echo "Запуск контроллера на ноутбуке"
-exec python3 "$ROOT_DIR/scripts/control.py"
+exec env \
+    ENERGY_RACE_UAV1_IP="$UAV1_IP" \
+    ENERGY_RACE_UAV2_IP="$UAV2_IP" \
+    python3 "$ROOT_DIR/scripts/control.py"

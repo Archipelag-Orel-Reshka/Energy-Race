@@ -26,11 +26,12 @@
   },
   "navigation": {
     "cruise_altitude": 2.0,
-    "station_departure_height": 1.0,
+    "station_departure_height": 2.0,
     "route_mode": "direct",
     "speed": 0.45,
+    "station_speed": 0.25,
     "arrival_tolerance": 0.25,
-    "station_arrival_tolerance": 0.15,
+    "station_arrival_tolerance": 0.1,
     "navigation_timeout": 45.0,
     "marker_timeout": 10.0,
     "landing_timeout": 45.0,
@@ -40,9 +41,10 @@
     "charge_seconds": 15.0,
     "green_seconds": 5.0,
     "uav1_route_delay": 5.0,
-    "station_hold_seconds": 1.0,
+    "station_hold_seconds": 3.0,
+    "station_post_grant_hold_seconds": 3.0,
     "station_preflight_timeout": 5.0,
-    "station_invitation_timeout": 45.0,
+    "station_invitation_timeout": 15.0,
     "operator_timeout": 300.0
   },
   "servo": {

@@ -3,6 +3,7 @@
 import datetime
 import json
 import math
+import signal
 import shutil
 import socket
 import subprocess
@@ -20,8 +21,30 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "mission_config.json"
 
 
+class StationDetectionDenied(RuntimeError):
+    pass
+
+
 def load_config():
     return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def handle_termination_signal(signum, _frame):
+    try:
+        print(
+            "WARNING: получен {}; запускаю безопасную посадку".format(
+                signal.Signals(signum).name
+            ),
+            flush=True,
+        )
+    except (BrokenPipeError, OSError):
+        pass
+    raise KeyboardInterrupt
+
+
+def install_termination_handlers():
+    signal.signal(signal.SIGHUP, handle_termination_signal)
+    signal.signal(signal.SIGTERM, handle_termination_signal)
 
 
 def marker_position(marker_id):
@@ -49,9 +72,12 @@ class MissionLog:
         }
         record.update(data)
         line = json.dumps(record, ensure_ascii=False)
-        print(line, flush=True)
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(line + "\n")
+        try:
+            print(line, flush=True)
+        except (BrokenPipeError, OSError):
+            pass
 
 
 class UdpBus:
@@ -104,6 +130,10 @@ class UdpBus:
             )
             if message.get("event") == "STATION_BUSY":
                 raise RuntimeError("зарядная станция занята")
+            if message.get("event") == "LAND_DENIED":
+                raise StationDetectionDenied(
+                    "станция не распознала LED до таймаута"
+                )
             if self._matches(message, event, request_id):
                 return message
             self.pending.append(message)
@@ -380,6 +410,7 @@ class Mission:
                 raise RuntimeError(
                     "укажи station_ip для {}".format(self.role)
                 )
+            self.verify_role_ip(station_ip)
             self.preflight_station(station_ip)
         if self.role == "uav2":
             try:
@@ -425,7 +456,8 @@ class Mission:
         self.goto_marker(self.role_config["station_marker"])
         self.center_on_station()
 
-        self.await_station_permission()
+        permission_granted = self.await_station_permission()
+        self.stabilize_after_land_grant(permission_granted)
 
         self.enter("LAND_STATION")
         self.land()
@@ -484,7 +516,8 @@ class Mission:
         self.goto_marker(self.role_config["station_marker"])
         self.center_on_station()
 
-        self.await_station_permission()
+        permission_granted = self.await_station_permission()
+        self.stabilize_after_land_grant(permission_granted)
 
         self.enter("LAND_STATION_WITH_CARGO")
         self.land()
@@ -684,14 +717,11 @@ class Mission:
             arrival_tolerance=float(
                 self.navigation["station_arrival_tolerance"]
             ),
+            speed=float(self.navigation["station_speed"]),
         )
 
         hold_seconds = float(self.timing["station_hold_seconds"])
-        deadline = time.monotonic() + hold_seconds
-        while time.monotonic() < deadline and not rospy.is_shutdown():
-            rospy.sleep(0.1)
-        if rospy.is_shutdown():
-            raise RuntimeError("ROS shutdown while centering on station")
+        self.hold_station_target(hold_seconds)
         self.log.write(
             "station_centered",
             station=station_id,
@@ -699,17 +729,118 @@ class Mission:
             hold_seconds=hold_seconds,
         )
 
+    def stabilize_after_land_grant(self, permission_granted=True):
+        station_id = int(self.role_config["station_marker"])
+        target_x, target_y = marker_position(station_id)
+        hold_seconds = float(
+            self.timing["station_post_grant_hold_seconds"]
+        )
+        state = (
+            "STABILIZE_AFTER_LAND_GRANTED"
+            if permission_granted
+            else "STABILIZE_FALLBACK_LANDING"
+        )
+        self.enter(state)
+        self.navigate_wait(
+            x=target_x,
+            y=target_y,
+            z=self.cruise_altitude,
+            frame_id="aruco_map",
+            arrival_tolerance=float(
+                self.navigation["station_arrival_tolerance"]
+            ),
+            speed=float(self.navigation["station_speed"]),
+        )
+
+        self.hold_station_target(hold_seconds)
+        self.log.write(
+            "post_grant_stabilized",
+            station=station_id,
+            altitude=self.cruise_altitude,
+            hold_seconds=hold_seconds,
+            permission_granted=bool(permission_granted),
+        )
+
+    def hold_station_target(self, hold_seconds):
+        hold_seconds = float(hold_seconds)
+        if hold_seconds <= 0.0:
+            return
+
+        deadline = time.monotonic() + hold_seconds
+        while time.monotonic() < deadline and not rospy.is_shutdown():
+            rospy.sleep(0.1)
+
+        if rospy.is_shutdown():
+            raise RuntimeError("ROS shutdown while stabilizing on station")
+        self.log.write("station_hold_complete", seconds=hold_seconds)
+
+    def verify_role_ip(self, station_ip):
+        expected_ip = str(self.network["{}_ip".format(self.role)])
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect((station_ip, 45901))
+            actual_ip = str(probe.getsockname()[0])
+        finally:
+            probe.close()
+        if actual_ip != expected_ip:
+            message = (
+                "запущена роль {} на БВС с IP {}; ожидался {}. "
+                "На 192.168.0.29 запускай uav1.py, на "
+                "192.168.0.184 запускай uav2.py".format(
+                    self.role,
+                    actual_ip,
+                    expected_ip,
+                )
+            )
+            print("WARNING: {} Миссия продолжится.".format(message), flush=True)
+            self.log.write(
+                "role_ip_warning",
+                expected_ip=expected_ip,
+                actual_ip=actual_ip,
+                message=message,
+                mission_continues=True,
+            )
+            return False
+        self.log.write(
+            "role_ip_ok",
+            expected_ip=expected_ip,
+            actual_ip=actual_ip,
+        )
+        return True
+
     def await_station_permission(self):
         if self.station_mode == "real":
             self.enter("WAIT_STATION_RED_DETECTION")
-            self.request_landing()
-            return
+            try:
+                self.request_landing()
+                return True
+            except StationDetectionDenied as error:
+                self.log.write(
+                    "station_detection_fallback",
+                    station=int(self.role_config["station_marker"]),
+                    error=str(error),
+                    fallback="aruco_center_land",
+                    mission_continues=True,
+                )
+                return False
+            except RuntimeError as error:
+                if str(error) != "timeout waiting for LAND_GRANTED":
+                    raise
+                self.log.write(
+                    "station_detection_fallback",
+                    station=int(self.role_config["station_marker"]),
+                    error=str(error),
+                    fallback="aruco_center_land",
+                    mission_continues=True,
+                )
+                return False
 
         self.enter("VIRTUAL_STATION")
         self.log.write(
             "virtual_station_no_invitation",
             marker=int(self.role_config["station_marker"]),
         )
+        return False
 
     def preflight_station(self, station_ip):
         expected_station = int(self.role_config["station_marker"])
@@ -772,13 +903,16 @@ class Mission:
         frame_id,
         auto_arm=False,
         arrival_tolerance=None,
+        speed=None,
     ):
         self.navigate(
             x=x,
             y=y,
             z=z,
             yaw=float("nan"),
-            speed=float(self.navigation["speed"]),
+            speed=float(
+                self.navigation["speed"] if speed is None else speed
+            ),
             frame_id=frame_id,
             auto_arm=auto_arm,
         )
@@ -920,6 +1054,7 @@ def main(role=None):
         raise SystemExit("Запусти uav1.py или uav2.py, не mission.py")
     config = load_config()
     mission = Mission(config, role)
+    install_termination_handlers()
     try:
         mission.run()
         return 0

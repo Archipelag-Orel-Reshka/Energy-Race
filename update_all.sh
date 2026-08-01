@@ -109,6 +109,15 @@ deploy_uav() {
 set -eu
 stage="$HOME/scripts/.energy-race-deploy"
 backup="$HOME/scripts/backups/$(date +%Y%m%d-%H%M%S)-main"
+for command in python3 sha256sum; do
+    command -v "$command" >/dev/null 2>&1 || {
+        echo "ERROR: на БВС не найдена команда $command" >&2
+        exit 1
+    }
+done
+(cd "$stage" && sha256sum \
+    mission.py mission_config.json uav1.py uav2.py \
+    test_half_red_blue.py > deployed.sha256)
 mkdir -p "$backup"
 for file in mission.py mission_config.json uav1.py uav2.py test_half_red_blue.py; do
     if [ -f "$HOME/scripts/$file" ]; then
@@ -120,6 +129,15 @@ install -m 644 "$stage/mission_config.json" "$HOME/scripts/mission_config.json"
 install -m 755 "$stage/uav1.py" "$HOME/scripts/uav1.py"
 install -m 755 "$stage/uav2.py" "$HOME/scripts/uav2.py"
 install -m 755 "$stage/test_half_red_blue.py" "$HOME/scripts/test_half_red_blue.py"
+install -m 644 "$stage/deployed.sha256" "$HOME/scripts/.energy-race-files.sha256"
+(cd "$HOME/scripts" && sha256sum -c .energy-race-files.sha256)
+python3 -m py_compile \
+    "$HOME/scripts/mission.py" \
+    "$HOME/scripts/uav1.py" \
+    "$HOME/scripts/uav2.py" \
+    "$HOME/scripts/test_half_red_blue.py"
+python3 -m json.tool "$HOME/scripts/mission_config.json" >/dev/null
+echo "remote validation: OK"
 echo "backup: $backup"
 REMOTE
 }
@@ -145,6 +163,12 @@ deploy_station() {
 set -eu
 station_id="$1"
 stage="$HOME/scripts/.energy-race-deploy"
+for command in python3 sha256sum; do
+    command -v "$command" >/dev/null 2>&1 || {
+        echo "ERROR: на станции не найдена команда $command" >&2
+        exit 1
+    }
+done
 actual_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["station_id"])' "$stage/config.json")"
 if [ "$actual_id" != "$station_id" ]; then
     echo "ERROR: ожидался station_id=$station_id, получен $actual_id" >&2
@@ -161,6 +185,15 @@ install -m 755 "$stage/station.py" "$HOME/scripts/station.py"
 install -m 755 "$stage/calibrate.py" "$HOME/scripts/calibrate.py"
 install -m 644 "$stage/config.json" "$HOME/scripts/config.json"
 install -m 644 "$stage/calibration.json" "$HOME/scripts/calibration.json"
+(cd "$stage" && sha256sum station.py calibrate.py > deployed.sha256)
+install -m 644 "$stage/deployed.sha256" "$HOME/scripts/.energy-race-files.sha256"
+(cd "$HOME/scripts" && sha256sum -c .energy-race-files.sha256)
+python3 -m py_compile \
+    "$HOME/scripts/station.py" \
+    "$HOME/scripts/calibrate.py"
+python3 -m json.tool "$HOME/scripts/config.json" >/dev/null
+python3 -m json.tool "$HOME/scripts/calibration.json" >/dev/null
+echo "remote validation: OK"
 echo "backup: $backup"
 REMOTE
 }

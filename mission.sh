@@ -63,6 +63,35 @@ if [ ! -f "$script" ]; then
     exit 1
 fi
 
+manifest="$scripts_dir/.energy-race-files.sha256"
+if [ ! -f "$manifest" ]; then
+    echo "ERROR: [$label] нет контрольной суммы развёртывания." >&2
+    echo "Сначала снова запусти ./update_all.sh с ноутбука." >&2
+    exit 1
+fi
+if ! (cd "$scripts_dir" && sha256sum -c "$manifest"); then
+    echo "ERROR: [$label] файлы изменились после update_all.sh." >&2
+    echo "Процесс не запущен; снова выполни ./update_all.sh и проверь backups." >&2
+    exit 1
+fi
+
+case "$script" in
+    uav1.py|uav2.py)
+        python3 -m py_compile mission.py uav1.py uav2.py test_half_red_blue.py
+        python3 -m json.tool mission_config.json >/dev/null
+        ;;
+    station.py)
+        python3 -m py_compile station.py calibrate.py
+        python3 -m json.tool config.json >/dev/null
+        python3 -m json.tool calibration.json >/dev/null
+        ;;
+    *)
+        echo "ERROR: [$label] неизвестный скрипт $script" >&2
+        exit 1
+        ;;
+esac
+echo "[$label] целостность и синтаксис файлов: OK"
+
 if [ -s "$pid_file" ]; then
     pid="$(cat "$pid_file")"
     if kill -0 "$pid" 2>/dev/null; then

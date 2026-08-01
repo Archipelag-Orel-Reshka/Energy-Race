@@ -507,7 +507,7 @@ class Mission:
         self.hold_before_station_route()
 
         self.enter("SEARCH_STATION_RED")
-        self.led("fill", 255, 0, 0)
+        self.try_led("fill", 255, 0, 0)
         self.goto_marker(self.role_config["station_marker"])
         self.center_on_station()
 
@@ -516,7 +516,7 @@ class Mission:
 
         self.enter("LAND_STATION")
         self.land()
-        self.notify_station("LANDED")
+        self.try_notify_station("LANDED")
         self.bus.status("STATION_LANDED")
 
         self.charge()
@@ -526,9 +526,9 @@ class Mission:
         self.bus.wait("RETURN_HOME", self.timing["operator_timeout"])
 
         self.enter("RETURN_HOME_GREEN")
-        self.led("blink", 0, 255, 0)
+        self.try_led("blink", 0, 255, 0)
         self.takeoff(self.navigation["station_departure_height"])
-        self.notify_station("STATION_RELEASED")
+        self.try_notify_station("STATION_RELEASED")
         self.goto_marker(
             self.role_config["home_marker"],
             altitude=self.return_altitude,
@@ -549,19 +549,19 @@ class Mission:
         self.wait_any_marker()
 
         self.enter("FLY_TO_CARGO_YELLOW")
-        self.led("blink", 255, 255, 0)
+        self.try_led("blink", 255, 255, 0)
         self.goto_marker(self.role_config["cargo_marker"])
 
         self.enter("LAND_CARGO")
         self.land()
-        self.led("fill", 255, 0, 0)
+        self.try_led("fill", 255, 0, 0)
         self.bus.status("CARGO_LANDED")
 
         self.enter("WAIT_CARGO_LOADED")
         self.bus.wait("CARGO_LOADED", self.timing["operator_timeout"])
 
         self.enter("CAPTURE_CARGO_RED")
-        self.led("fill", 255, 0, 0)
+        self.try_led("fill", 255, 0, 0)
         servo_ok = self.try_servo_action("close_grip")
         self.bus.status("CARGO_READY", servo_ok=servo_ok)
 
@@ -579,15 +579,24 @@ class Mission:
 
         self.enter("LAND_STATION_WITH_CARGO")
         self.land()
-        self.notify_station("LANDED")
+        self.try_notify_station("LANDED")
         self.bus.status("STATION_LANDED")
 
-        self.charge(release_cargo=True)
+        self.enter("RELEASE_CARGO_AT_STATION")
+        servo_ok = self.try_servo_action("open_grip")
+        self.log.write(
+            "cargo_release_before_charge",
+            station=int(self.role_config["station_marker"]),
+            servo_ok=servo_ok,
+            mission_continues=True,
+        )
+
+        self.charge()
 
         self.enter("RETURN_HOME_HALF_RED_BLUE")
-        self.half_red_blue()
+        self.try_half_red_blue()
         self.takeoff(self.navigation["station_departure_height"])
-        self.notify_station("STATION_RELEASED")
+        self.try_notify_station("STATION_RELEASED")
         self.goto_marker(
             self.role_config["home_marker"],
             altitude=self.return_altitude,
@@ -638,6 +647,47 @@ class Mission:
                 mission_continues=True,
             )
             self.servo.release()
+            return False
+
+    def try_led(self, effect, red, green, blue):
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                self.led(effect, red, green, blue)
+                if attempt > 1:
+                    self.log.write(
+                        "led_action_recovered",
+                        effect=effect,
+                        attempt=attempt,
+                    )
+                return True
+            except Exception as error:
+                last_error = error
+                if attempt < 3:
+                    rospy.sleep(0.1)
+
+        self.log.write(
+            "led_action_warning",
+            effect=effect,
+            r=red,
+            g=green,
+            b=blue,
+            attempts=3,
+            error=str(last_error),
+            mission_continues=True,
+        )
+        return False
+
+    def try_half_red_blue(self):
+        try:
+            self.half_red_blue()
+            return True
+        except Exception as error:
+            self.log.write(
+                "led_half_red_blue_warning",
+                error=str(error),
+                mission_continues=True,
+            )
             return False
 
     def hold_before_station_route(self):
@@ -1095,7 +1145,16 @@ class Mission:
 
     def land(self):
         started = time.monotonic()
-        deadline = started + float(self.navigation["landing_timeout"])
+        landing_timeout = float(self.navigation["landing_timeout"])
+        guarded_disarm_seconds = float(
+            self.navigation["landing_guarded_disarm_seconds"]
+        )
+        if not 0.0 < guarded_disarm_seconds < landing_timeout:
+            raise RuntimeError(
+                "landing_guarded_disarm_seconds должен быть меньше "
+                "landing_timeout"
+            )
+        deadline = started + landing_timeout
         retry_seconds = float(self.navigation["landing_retry_seconds"])
         ground_confirm_seconds = float(
             self.navigation["landing_ground_confirm_seconds"]
@@ -1129,36 +1188,50 @@ class Mission:
                 )
                 return
 
+            disarm_source = None
+            ground_seconds = None
             if self._ground_state_is_fresh(now):
                 if ground_since is None:
                     ground_since = now
                     self.log.write("landing_ground_detected")
-                if (
-                    now - ground_since >= ground_confirm_seconds
-                    and now >= next_disarm
-                ):
-                    disarm_attempt += 1
-                    next_disarm = now + disarm_retry_seconds
-                    try:
-                        response = self.arming_service(False)
-                        success = bool(
-                            getattr(response, "success", False)
-                        )
-                        self.log.write(
-                            "landing_disarm_command",
-                            attempt=disarm_attempt,
-                            success=success,
-                            ground_seconds=round(now - ground_since, 1),
-                        )
-                    except Exception as error:
-                        self.log.write(
-                            "landing_disarm_failed",
-                            attempt=disarm_attempt,
-                            error=str(error),
-                            mission_continues=True,
-                        )
+                ground_seconds = now - ground_since
+                if ground_seconds >= ground_confirm_seconds:
+                    disarm_source = "confirmed_ground"
             else:
                 ground_since = None
+                if now - started >= guarded_disarm_seconds:
+                    # This is a normal PX4 disarm request, not a forced
+                    # in-flight disarm. PX4 rejects it while the vehicle is
+                    # airborne, but accepts it after touchdown even if the
+                    # MAVROS extended-state topic is stale.
+                    disarm_source = "px4_guarded_fallback"
+
+            if disarm_source is not None and now >= next_disarm:
+                disarm_attempt += 1
+                next_disarm = now + disarm_retry_seconds
+                try:
+                    response = self.arming_service(False)
+                    success = bool(getattr(response, "success", False))
+                    self.log.write(
+                        "landing_disarm_command",
+                        attempt=disarm_attempt,
+                        success=success,
+                        source=disarm_source,
+                        landing_elapsed=round(now - started, 1),
+                        ground_seconds=(
+                            None
+                            if ground_seconds is None
+                            else round(ground_seconds, 1)
+                        ),
+                    )
+                except Exception as error:
+                    self.log.write(
+                        "landing_disarm_failed",
+                        attempt=disarm_attempt,
+                        source=disarm_source,
+                        error=str(error),
+                        mission_continues=True,
+                    )
             rospy.sleep(0.2)
         if rospy.is_shutdown():
             raise RuntimeError("ROS shutdown during landing")
@@ -1210,27 +1283,30 @@ class Mission:
             request_id=self.station_request_id,
         )
 
-    def charge(self, release_cargo=False):
+    def try_notify_station(self, event):
+        try:
+            self.notify_station(event)
+            return True
+        except Exception as error:
+            self.log.write(
+                "station_notification_warning",
+                message=event,
+                error=str(error),
+                mission_continues=True,
+            )
+            return False
+
+    def charge(self):
         red_seconds = float(self.timing["charge_seconds"])
         green = float(self.timing["green_seconds"])
         red_until = time.monotonic() + red_seconds
-        self.enter(
-            "CHARGING_RED_BLINK_RELEASE_CARGO"
-            if release_cargo
-            else "CHARGING_RED_BLINK"
-        )
-        self.led("blink", 255, 0, 0)
-        if release_cargo:
-            self.log.write(
-                "cargo_release_during_charge",
-                red_blink_seconds=red_seconds,
-            )
-            self.try_servo_action("open_grip")
+        self.enter("CHARGING_RED_BLINK")
+        self.try_led("blink", 255, 0, 0)
         while time.monotonic() < red_until:
             rospy.sleep(0.1)
 
         self.enter("CHARGING_GREEN")
-        self.led("fill", 0, 255, 0)
+        self.try_led("fill", 0, 255, 0)
         deadline = red_until + green
         while time.monotonic() < deadline:
             rospy.sleep(0.1)

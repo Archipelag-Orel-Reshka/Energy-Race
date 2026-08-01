@@ -40,9 +40,10 @@
     "station_center_timeout": 15.0,
     "navigation_timeout": 45.0,
     "marker_timeout": 10.0,
-    "landing_timeout": 45.0,
+    "landing_timeout": 30.0,
     "landing_retry_seconds": 10.0,
     "landing_ground_confirm_seconds": 1.0,
+    "landing_guarded_disarm_seconds": 8.0,
     "landing_disarm_retry_seconds": 2.0,
     "landing_state_max_age": 2.0
   },

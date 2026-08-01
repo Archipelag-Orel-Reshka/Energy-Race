@@ -174,6 +174,11 @@ class MissionTests(unittest.TestCase):
             CONFIG["navigation"]["landing_ground_confirm_seconds"],
             1.0,
         )
+        self.assertEqual(CONFIG["navigation"]["landing_timeout"], 30.0)
+        self.assertEqual(
+            CONFIG["navigation"]["landing_guarded_disarm_seconds"],
+            8.0,
+        )
 
     def test_preflight_rejects_non_free_station(self):
         mission = self.make_mission("uav1")
@@ -301,6 +306,59 @@ class MissionTests(unittest.TestCase):
         self.assertEqual(len(fallbacks), 1)
         self.assertEqual(fallbacks[0]["fallback"], "aruco_center_land")
         self.assertTrue(fallbacks[0]["mission_continues"])
+
+    def test_both_roles_finish_after_station_detection_fallback(self):
+        for role in ("uav1", "uav2"):
+            mission = self.make_mission(role)
+            events = []
+            mission.led = lambda *_args: None
+            mission.try_led = lambda *_args: True
+            mission.wait_start = lambda: None
+            mission.takeoff = lambda height: events.append(
+                ("takeoff", height)
+            )
+            mission.wait_any_marker = lambda: None
+            mission.hold_before_station_route = lambda: None
+            mission.goto_marker = lambda marker, altitude=None: events.append(
+                ("goto", marker, altitude)
+            )
+            mission.center_on_station = lambda: None
+            mission.await_station_permission = lambda: False
+            mission.stabilize_after_land_grant = (
+                lambda permission: events.append(
+                    ("stabilized", permission)
+                )
+            )
+            mission.land = lambda: events.append(("land", None))
+            mission.try_notify_station = lambda event: (
+                events.append(("station", event)) or True
+            )
+            mission.charge = lambda: events.append(("charge", None))
+            mission.bus.wait = lambda *_args, **_kwargs: None
+            mission.try_servo_action = lambda action: (
+                events.append(("servo", action)) or False
+            )
+            mission.try_half_red_blue = lambda: (
+                events.append(("led", "half_red_blue")) or False
+            )
+
+            if role == "uav1":
+                mission.run_uav1()
+            else:
+                mission.run_uav2()
+
+            self.assertIn(("stabilized", False), events)
+            self.assertIn(("station", "LANDED"), events)
+            self.assertIn(("station", "STATION_RELEASED"), events)
+            self.assertIn(("DONE", {}), mission.bus.states)
+            self.assertIn(("charge", None), events)
+            if role == "uav2":
+                self.assertLess(
+                    events.index(("servo", "open_grip")),
+                    events.index(("charge", None)),
+                )
+            if role == "uav2":
+                self.assertIn(("led", "half_red_blue"), events)
 
     def test_uav1_uses_one_direct_leg_to_station(self):
         mission = self.make_mission("uav1")
@@ -732,10 +790,8 @@ class MissionTests(unittest.TestCase):
             mission.notify_station = lambda event: events.append(
                 ("station", event)
             )
-            def charge(release_cargo=False):
-                events.append(("charge", release_cargo))
-                if release_cargo:
-                    mission.try_servo_action("open_grip")
+            def charge():
+                events.append(("charge", None))
 
             mission.charge = charge
             mission.bus.wait = lambda *_args, **_kwargs: None
@@ -758,9 +814,13 @@ class MissionTests(unittest.TestCase):
                         ("servo", "open_grip"),
                     ],
                 )
-                self.assertIn(("charge", True), events)
+                self.assertIn(("charge", None), events)
                 self.assertLess(
                     events.index(("servo", "open_grip")),
+                    events.index(("charge", None)),
+                )
+                self.assertLess(
+                    events.index(("charge", None)),
                     events.index(("led", "half")),
                 )
 
@@ -952,6 +1012,52 @@ class MissionTests(unittest.TestCase):
 
         self.assertEqual(disarm_commands, [])
 
+    def test_land_uses_guarded_disarm_when_extended_state_is_stale(self):
+        mission = self.make_mission("uav1")
+        clock = [0.0]
+        armed = [True]
+        disarm_commands = []
+        original_monotonic = MISSION.time.monotonic
+        original_sleep = ROS.sleep
+
+        class Telemetry:
+            @property
+            def armed(self):
+                return armed[0]
+
+        class Response:
+            success = True
+
+        mission.land_service = lambda: None
+        mission.get_telemetry = lambda: Telemetry()
+
+        def arming(value):
+            disarm_commands.append((clock[0], value))
+            armed[0] = False
+            return Response()
+
+        mission.arming_service = arming
+        mission.extended_landed_state = None
+        mission.extended_state_updated = None
+        MISSION.time.monotonic = lambda: clock[0]
+        ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        try:
+            mission.land()
+        finally:
+            MISSION.time.monotonic = original_monotonic
+            ROS.sleep = original_sleep
+
+        self.assertEqual(len(disarm_commands), 1)
+        self.assertFalse(disarm_commands[0][1])
+        self.assertGreaterEqual(disarm_commands[0][0], 8.0)
+        self.assertLess(disarm_commands[0][0], 8.2)
+        events = [
+            data for event, data in mission.log.events
+            if event == "landing_disarm_command"
+        ]
+        self.assertEqual(events[0]["source"], "px4_guarded_fallback")
+        self.assertFalse(mission.flight_active)
+
     def test_half_red_blue_uses_exactly_36_plus_36_leds(self):
         mission = self.make_mission("uav2")
         sent = []
@@ -1037,40 +1143,35 @@ class MissionTests(unittest.TestCase):
         self.assertLess(states[1][1], 15.2)
         self.assertGreaterEqual(clock[0], 20.0)
 
-    def test_uav2_releases_cargo_during_red_charge_phase(self):
+    def test_uav2_charge_continues_after_led_failure(self):
         mission = self.make_mission("uav2")
         clock = [0.0]
-        indications = []
-        actions = []
-        states = []
+        led_attempts = []
         original_monotonic = MISSION.time.monotonic
         original_sleep = ROS.sleep
-        mission.enter = lambda state: states.append((state, clock[0]))
-        mission.led = lambda effect, red, green, blue: indications.append(
-            (effect, red, green, blue, clock[0])
-        )
-        mission.try_servo_action = lambda action: (
-            actions.append((action, clock[0], indications[-1][:4])) or True
+        mission.try_led = lambda *args: (
+            led_attempts.append(args) or False
         )
         MISSION.time.monotonic = lambda: clock[0]
         ROS.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
         try:
-            mission.charge(release_cargo=True)
+            mission.charge()
         finally:
             MISSION.time.monotonic = original_monotonic
             ROS.sleep = original_sleep
 
         self.assertEqual(
-            states[0],
-            ("CHARGING_RED_BLINK_RELEASE_CARGO", 0.0),
+            led_attempts,
+            [
+                ("blink", 255, 0, 0),
+                ("fill", 0, 255, 0),
+            ],
         )
-        self.assertEqual(
-            actions,
-            [("open_grip", 0.0, ("blink", 255, 0, 0))],
-        )
-        self.assertEqual(indications[1][:4], ("fill", 0, 255, 0))
-        self.assertGreaterEqual(indications[1][4], 15.0)
         self.assertGreaterEqual(clock[0], 20.0)
+        self.assertTrue(any(
+            event == "charging_done"
+            for event, _data in mission.log.events
+        ))
 
     def test_gpio_servo_matches_calibrated_values(self):
         servo = MISSION.Servo(CONFIG["servo"], FakeLog())
@@ -1117,6 +1218,42 @@ class MissionTests(unittest.TestCase):
         ]
         self.assertEqual(len(warnings), 1)
         self.assertTrue(warnings[0]["mission_continues"])
+
+    def test_led_and_station_notification_failures_are_non_fatal(self):
+        mission = self.make_mission("uav2")
+        led_attempts = []
+
+        def broken_led(*args):
+            led_attempts.append(args)
+            raise RuntimeError("LED unavailable")
+
+        mission.led = broken_led
+        self.assertFalse(mission.try_led("blink", 255, 0, 0))
+        self.assertEqual(len(led_attempts), 3)
+
+        mission.half_red_blue = lambda: (_ for _ in ()).throw(
+            RuntimeError("set_leds unavailable")
+        )
+        self.assertFalse(mission.try_half_red_blue())
+
+        mission.notify_station = lambda _event: (_ for _ in ()).throw(
+            OSError("network unavailable")
+        )
+        self.assertFalse(mission.try_notify_station("LANDED"))
+
+        warning_events = {
+            event: data for event, data in mission.log.events
+            if event.endswith("warning")
+        }
+        self.assertTrue(warning_events["led_action_warning"][
+            "mission_continues"
+        ])
+        self.assertTrue(warning_events["led_half_red_blue_warning"][
+            "mission_continues"
+        ])
+        self.assertTrue(warning_events["station_notification_warning"][
+            "mission_continues"
+        ])
 
     def test_invalid_servo_config_is_non_fatal(self):
         log = FakeLog()
@@ -1183,6 +1320,18 @@ class ControllerTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
+    def test_update_and_launch_validate_remote_files(self):
+        updater = (ROOT / "update_all.sh").read_text(encoding="utf-8")
+        launcher = (ROOT / "mission.sh").read_text(encoding="utf-8")
+
+        self.assertIn("sha256sum -c .energy-race-files.sha256", updater)
+        self.assertIn("python3 -m py_compile", updater)
+        self.assertIn("python3 -m json.tool", updater)
+        self.assertIn(".energy-race-files.sha256", launcher)
+        self.assertIn("sha256sum -c", launcher)
+        self.assertIn("python3 -m py_compile", launcher)
+        self.assertIn("python3 -m json.tool", launcher)
+
     def test_remote_uav_launch_loads_interactive_ros_environment(self):
         launcher = (ROOT / "mission.sh").read_text(encoding="utf-8")
 

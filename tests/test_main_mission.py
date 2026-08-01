@@ -1320,6 +1320,15 @@ class ControllerTests(unittest.TestCase):
 
 
 class LauncherTests(unittest.TestCase):
+    def test_ssh_key_installer_copies_only_public_key_and_verifies_login(self):
+        installer = (ROOT / "install_ssh_keys.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('ssh-copy-id -i "$KEY_FILE.pub"', installer)
+        self.assertIn("-o BatchMode=yes", installer)
+        self.assertNotIn('scp "$KEY_FILE"', installer)
+
     def test_update_and_launch_validate_remote_files(self):
         updater = (ROOT / "update_all.sh").read_text(encoding="utf-8")
         launcher = (ROOT / "mission.sh").read_text(encoding="utf-8")

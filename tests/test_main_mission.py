@@ -314,7 +314,7 @@ class MissionTests(unittest.TestCase):
             mission.led = lambda *_args: None
             mission.try_led = lambda *_args: True
             mission.wait_start = lambda: None
-            mission.takeoff = lambda height: events.append(
+            mission.takeoff = lambda height, **_kwargs: events.append(
                 ("takeoff", height)
             )
             mission.wait_any_marker = lambda: None
@@ -460,8 +460,12 @@ class MissionTests(unittest.TestCase):
             mission.enter = lambda state: events.append(state)
             mission.led = lambda *args: None
             mission.wait_start = lambda: None
-            mission.takeoff = lambda altitude: events.append(
-                ("takeoff", altitude)
+            mission.takeoff = lambda altitude, **kwargs: events.append(
+                (
+                    "takeoff",
+                    altitude,
+                    kwargs.get("reapply_yellow_after_arm", False),
+                )
             )
             mission.wait_any_marker = lambda: events.append("aruco_ready")
             mission.hold_before_station_route = lambda: events.append(
@@ -485,7 +489,7 @@ class MissionTests(unittest.TestCase):
             [
                 "WAIT_START",
                 "TAKEOFF_YELLOW",
-                ("takeoff", 2.0),
+                ("takeoff", 2.0, True),
                 "aruco_ready",
                 "uav1_delay",
                 "SEARCH_STATION_RED",
@@ -497,7 +501,7 @@ class MissionTests(unittest.TestCase):
             [
                 "WAIT_START",
                 "TAKEOFF_YELLOW",
-                ("takeoff", 2.0),
+                ("takeoff", 2.0, True),
                 "aruco_ready",
                 "FLY_TO_CARGO_YELLOW",
                 ("goto", 0),
@@ -515,7 +519,7 @@ class MissionTests(unittest.TestCase):
             (effect, red, green, blue)
         )
         uav1.wait_start = lambda: None
-        uav1.takeoff = lambda _height: None
+        uav1.takeoff = lambda _height, **_kwargs: None
         uav1.wait_any_marker = lambda: None
         uav1.hold_before_station_route = lambda: None
         uav1.goto_marker = lambda _marker: (_ for _ in ()).throw(
@@ -538,7 +542,7 @@ class MissionTests(unittest.TestCase):
             (effect, red, green, blue)
         )
         uav2.wait_start = lambda: None
-        uav2.takeoff = lambda _height: None
+        uav2.takeoff = lambda _height, **_kwargs: None
         uav2.wait_any_marker = lambda: None
         uav2.goto_marker = lambda _marker: None
         uav2.land = lambda: None
@@ -557,6 +561,53 @@ class MissionTests(unittest.TestCase):
                 ("fill", 255, 0, 0),
             ],
         )
+
+    def test_initial_takeoff_reapplies_yellow_only_after_arm(self):
+        mission = self.make_mission("uav1")
+        samples_seen = []
+        led_events = []
+
+        class Telemetry:
+            def __init__(self, armed, distance):
+                self.armed = armed
+                self.x = 0.0
+                self.y = 0.0
+                self.z = distance
+
+        samples = iter((
+            Telemetry(False, 2.0),
+            Telemetry(True, 1.0),
+            Telemetry(True, 0.0),
+        ))
+        mission.navigate = lambda **_kwargs: None
+
+        def telemetry(**_kwargs):
+            sample = next(samples)
+            samples_seen.append(sample)
+            return sample
+
+        mission.get_telemetry = telemetry
+        mission.try_led = lambda *args: (
+            led_events.append((len(samples_seen), args)) or True
+        )
+
+        mission.takeoff(2.0, reapply_yellow_after_arm=True)
+
+        self.assertEqual(
+            led_events,
+            [(2, ("blink", 255, 255, 0))],
+        )
+        reapplications = [
+            data for event, data in mission.log.events
+            if event == "takeoff_led_reapplied_after_arm"
+        ]
+        self.assertEqual(len(reapplications), 1)
+        self.assertTrue(reapplications[0]["success"])
+
+        calls = []
+        mission.navigate_wait = lambda **kwargs: calls.append(kwargs)
+        mission.takeoff(2.0)
+        self.assertIsNone(calls[0]["post_arm_led"])
 
     def test_station_centering_uses_precise_tolerance(self):
         for role, expected, strict, relaxed in (
@@ -689,7 +740,7 @@ class MissionTests(unittest.TestCase):
         mission.enter = lambda state: events.append(state)
         mission.led = lambda *args: None
         mission.wait_start = lambda: None
-        mission.takeoff = lambda _altitude: None
+        mission.takeoff = lambda _altitude, **_kwargs: None
         mission.wait_any_marker = lambda: None
         mission.hold_before_station_route = lambda: None
         mission.goto_marker = lambda _marker: None
@@ -733,7 +784,7 @@ class MissionTests(unittest.TestCase):
         mission.enter = lambda state: events.append(state)
         mission.led = lambda *args: None
         mission.wait_start = lambda: None
-        mission.takeoff = lambda _altitude: None
+        mission.takeoff = lambda _altitude, **_kwargs: None
         mission.wait_any_marker = lambda: None
         mission.goto_marker = lambda _marker: None
         mission.center_on_station = lambda: events.append("CENTER_INITIAL")
@@ -777,7 +828,9 @@ class MissionTests(unittest.TestCase):
             mission.enter = lambda state: events.append(("state", state))
             mission.led = lambda *_args: None
             mission.wait_start = lambda: None
-            mission.takeoff = lambda height: events.append(("takeoff", height))
+            mission.takeoff = lambda height, **_kwargs: events.append(
+                ("takeoff", height)
+            )
             mission.wait_any_marker = lambda: None
             mission.hold_before_station_route = lambda: None
             mission.goto_marker = lambda marker, altitude=None: routes.append(

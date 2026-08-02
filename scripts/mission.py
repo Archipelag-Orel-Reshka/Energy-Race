@@ -500,7 +500,10 @@ class Mission:
         self.wait_start()
 
         self.enter("TAKEOFF_YELLOW")
-        self.takeoff(self.cruise_altitude)
+        self.takeoff(
+            self.cruise_altitude,
+            reapply_yellow_after_arm=True,
+        )
         self.wait_any_marker()
         self.bus.status("TAKEOFF_DONE")
 
@@ -545,7 +548,10 @@ class Mission:
         self.wait_start()
 
         self.enter("TAKEOFF_YELLOW")
-        self.takeoff(self.cruise_altitude)
+        self.takeoff(
+            self.cruise_altitude,
+            reapply_yellow_after_arm=True,
+        )
         self.wait_any_marker()
 
         self.enter("FLY_TO_CARGO_YELLOW")
@@ -761,7 +767,7 @@ class Mission:
             == ExtendedState.LANDED_STATE_ON_GROUND
         )
 
-    def takeoff(self, height):
+    def takeoff(self, height, reapply_yellow_after_arm=False):
         self.flight_active = True
         self.navigate_wait(
             x=0.0,
@@ -769,6 +775,9 @@ class Mission:
             z=float(height),
             frame_id="body",
             auto_arm=True,
+            post_arm_led=("blink", 255, 255, 0)
+            if reapply_yellow_after_arm
+            else None,
         )
 
     def goto_marker(self, marker_id, altitude=None):
@@ -1059,6 +1068,7 @@ class Mission:
         timeout=None,
         timeout_tolerance=None,
         context="navigation",
+        post_arm_led=None,
     ):
         self.navigate(
             x=x,
@@ -1084,8 +1094,24 @@ class Mission:
         )
         last_distance = None
         best_distance = None
+        post_arm_led_pending = post_arm_led is not None
         while time.monotonic() < deadline and not rospy.is_shutdown():
             telemetry = self.get_telemetry(frame_id="navigate_target")
+            if (
+                post_arm_led_pending
+                and bool(getattr(telemetry, "armed", False))
+            ):
+                effect, red, green, blue = post_arm_led
+                led_ok = self.try_led(effect, red, green, blue)
+                self.log.write(
+                    "takeoff_led_reapplied_after_arm",
+                    effect=effect,
+                    r=red,
+                    g=green,
+                    b=blue,
+                    success=led_ok,
+                )
+                post_arm_led_pending = False
             distance = math.sqrt(
                 telemetry.x ** 2
                 + telemetry.y ** 2
